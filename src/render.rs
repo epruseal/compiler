@@ -594,6 +594,30 @@ mod tests {
     }
 
     #[test]
+    fn path_registry_treats_title_rename_as_same_law() {
+        let mut registry = PathRegistry::default();
+        let (path, _) = registry.get_law_path(
+            "헌법재판소 참고인 비용지급에 관한 규칙",
+            "헌법재판소규칙",
+            "006104",
+        );
+        assert_eq!(
+            path,
+            RepoPathBuf::kr_file("헌법재판소참고인비용지급에관한규칙", "헌법재판소규칙.md",)
+        );
+
+        let (path, _) = registry.get_law_path(
+            "헌법재판소 참고인 등 비용지급에 관한 규칙",
+            "헌법재판소규칙",
+            "006104",
+        );
+        assert_eq!(
+            path,
+            RepoPathBuf::kr_file("헌법재판소참고인비용지급에관한규칙", "헌법재판소규칙.md",)
+        );
+    }
+
+    #[test]
     fn path_registry_merges_qualified_paths_for_same_law_id() {
         let mut registry = PathRegistry::default();
         // ID001 claims the base path
