@@ -1,9 +1,12 @@
-[package]
-name = "legalize-kr-compiler"
+[workspace]
+resolver = "3"
+members = ["laws", "precedents", "admrules", "ordinances", "git-writer"]
+
+[workspace.package]
 version = "0.1.0"
 edition = "2024"
 
-[dependencies]
+[workspace.dependencies]
 anyhow = "1.0"
 clap = { version = "4.5", features = ["derive"] }
 crc32fast = "1.5.0"
@@ -17,20 +20,12 @@ serde_yaml = "0.9"
 sha1 = "0.10"
 smallvec = "1.15.1"
 time = "0.3"
+unicode-normalization = "0.1"
 zlib-rs = "0.6.3"
-
-# Optional dependencies for performance improvements
-mimalloc = { version = "0.1.48", optional = true }
-libdeflater = { version = "1.25.2", optional = true }
-
-[features]
-# Enabling these optional dependencies improves performance by using mimalloc
-# instead of the default allocator and libdeflater instead of zlib-rs, but it
-# makes cross-compilation harder. Both are enabled by default.
-default = ["dep:mimalloc", "dep:libdeflater"]
-
-[dev-dependencies]
+mimalloc = "0.1.48"
+libdeflater = "1.25.2"
 tempfile = "3.18"
+proptest = "1.5"
 
 [profile.release]
 lto = "fat"

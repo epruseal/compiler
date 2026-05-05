@@ -1,0 +1,35 @@
+[package]
+name = "legalize-kr-compiler"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+anyhow.workspace = true
+clap.workspace = true
+crc32fast.workspace = true
+quick-xml.workspace = true
+rayon.workspace = true
+regex.workspace = true
+rustc-hash.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+serde_yaml.workspace = true
+sha1.workspace = true
+smallvec.workspace = true
+time.workspace = true
+zlib-rs.workspace = true
+
+# Optional dependencies for performance improvements
+mimalloc = { workspace = true, optional = true }
+libdeflater = { workspace = true, optional = true }
+
+[features]
+# Enabling these optional dependencies improves performance by using mimalloc
+# instead of the default allocator and libdeflater instead of zlib-rs, but it
+# makes cross-compilation harder. Both are enabled by default.
+default = ["mimalloc", "libdeflater"]
+mimalloc = ["dep:mimalloc"]
+libdeflater = ["dep:libdeflater"]
+
+[dev-dependencies]
+tempfile.workspace = true

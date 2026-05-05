@@ -35,7 +35,7 @@ use crate::xml_parser::{LawDetail, LawMetadata, parse_law_body, parse_metadata_o
 const REPOSITORY_README: &[u8] = include_bytes!("../assets/README.md");
 
 /// Global allocator tuned for high-throughput allocation-heavy pack generation.
-#[cfg(feature = "default")]
+#[cfg(feature = "mimalloc")]
 #[global_allocator]
 static GLOBAL_ALLOCATOR: mimalloc::MiMalloc = mimalloc::MiMalloc;
 
@@ -548,6 +548,7 @@ fn render_entry(detail_dir: &Path, entry: &PlannedEntry) -> Result<Rendered> {
         metadata: entry.metadata.clone(),
         articles: body.articles,
         addenda: body.addenda,
+        attachments: body.attachments,
     };
     let time = GitTimestampKst::from_promulgation_date(&detail.metadata.promulgation_date)?;
 

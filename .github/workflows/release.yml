@@ -5,6 +5,12 @@ on:
     branches: [main]
     paths-ignore:
       - "README.md"
+      - "laws/README.md"
+      - "laws/assets/README.md"
+      - "precedents/README.md"
+      - "precedents/assets/README.md"
+      - "admrules/assets/README.md"
+      - "ordinances/assets/README.md"
 
 jobs:
   release:
@@ -23,22 +29,35 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          cargo zigbuild --no-default-features -r --target x86_64-unknown-linux-musl
-          cargo zigbuild --no-default-features -r --target aarch64-unknown-linux-musl
-          cargo zigbuild --no-default-features -r --target universal2-apple-darwin
-          mv target/aarch64-unknown-linux-musl/release/legalize-kr-compiler legalize-kr-compiler-aarch64-unknown-linux-musl
-          mv target/x86_64-unknown-linux-musl/release/legalize-kr-compiler legalize-kr-compiler-x86_64-unknown-linux-musl
-          mv target/universal2-apple-darwin/release/legalize-kr-compiler legalize-kr-compiler-universal2-apple-darwin
-          tar -cvf binaries.tar \
-            legalize-kr-compiler-aarch64-unknown-linux-musl \
-            legalize-kr-compiler-x86_64-unknown-linux-musl \
-            legalize-kr-compiler-universal2-apple-darwin
+          cargo zigbuild --workspace --no-default-features -r --target x86_64-unknown-linux-musl
+          cargo zigbuild --workspace --no-default-features -r --target aarch64-unknown-linux-musl
+          cargo zigbuild --workspace --no-default-features -r --target universal2-apple-darwin
+
+          bins=(
+            legalize-kr-compiler
+            precedent-kr-compiler
+            admrule-kr-compiler
+            ordinance-kr-compiler
+          )
+          targets=(
+            aarch64-unknown-linux-musl
+            x86_64-unknown-linux-musl
+            universal2-apple-darwin
+          )
+          assets=()
+
+          for bin in "${bins[@]}"; do
+            for target in "${targets[@]}"; do
+              asset="${bin}-${target}"
+              mv "target/${target}/release/${bin}" "${asset}"
+              assets+=("${asset}")
+            done
+          done
+
+          tar -cvf binaries.tar "${assets[@]}"
 
           VERSION="v$(grep '^version' Cargo.toml | head -1 | sed 's/.*"\(.*\)"/\1/')"
           TAG="${VERSION}-$(date -u +%Y%m%d%H%M%S)"
           git tag "$TAG"
           git push origin "$TAG"
-          gh release create "$TAG" --title "$TAG" --generate-notes \
-            legalize-kr-compiler-aarch64-unknown-linux-musl \
-            legalize-kr-compiler-x86_64-unknown-linux-musl \
-            legalize-kr-compiler-universal2-apple-darwin
+          gh release create "$TAG" --title "$TAG" --generate-notes "${assets[@]}"
