@@ -1,4 +1,4 @@
-# Administrative Rules KR
+# 대한민국 행정규칙 저장소
 
 대한민국 행정규칙을 Git 저장소로 관리합니다. 각 행정규칙은 Markdown 파일이고, 원문 XML에서 추출한 메타데이터와 본문을 함께 기록합니다.
 
@@ -16,7 +16,7 @@ cd admrule-kr
 ls 행정안전부/
 
 # 고시 목록 보기
-ls 행정안전부/고시/
+ls 행정안전부/_본부/고시/
 
 # 전체 행정규칙에서 특정 단어 검색
 grep -rl "개인정보" .
@@ -25,7 +25,12 @@ grep -rl "개인정보" .
 ## 구조
 
 ```text
-{기관경로...}/{행정규칙종류}/{행정규칙명}/본문.md
+{기관경로...}/
+  {행정규칙종류}/
+    {행정규칙명}/
+      본문.md
+    {행정규칙명}_{발령번호 또는 행정규칙일련번호}/
+      본문.md
 ```
 
 예:
@@ -172,6 +177,21 @@ grep -rl "개인정보" .
 - 독립기관: 국가인권위원회법 제3조, 고위공직자범죄수사처법 제3조처럼 독립 수행이 명시되고 특정 상위기관 소속 조항이 없는 기관은 대통령·국무총리·부처 산하로 자동 편입하지 않습니다.
 - 과거 `방송통신위원회` 발령 규칙이라도 현재 담당부서가 `과학기술정보통신부(주파수정책과)`처럼 과학기술정보통신부 본부로 확인되는 전파·통신 규칙은 [방송미디어통신위원회의 설치 및 운영에 관한 법률](https://www.law.go.kr/법령/방송미디어통신위원회의설치및운영에관한법률) 제3조의 대통령 소속 위원회로 자동 이동하지 않습니다.
 - 원천 데이터만으로 승계 관계가 불명확한 경우: 매핑하지 않고 원문 기관명을 보존합니다.
+
+## 관련 저장소
+
+Legalize-KR은 수집·컴파일러·결과 저장소를 분리해 관리합니다.
+
+| 저장소 | 설명 |
+|--------|------|
+| [legalize-kr/legalize-kr](https://github.com/legalize-kr/legalize-kr) | 법령 데이터 |
+| [legalize-kr/precedent-kr](https://github.com/legalize-kr/precedent-kr) | 판례 데이터 |
+| [legalize-kr/admrule-kr](https://github.com/legalize-kr/admrule-kr) | 행정규칙 데이터 (현재 저장소) |
+| [legalize-kr/ordinance-kr](https://github.com/legalize-kr/ordinance-kr) | 자치법규 데이터 |
+| [legalize-kr/legalize-pipeline](https://github.com/legalize-kr/legalize-pipeline) | 공공 데이터 수집 및 캐시 갱신 파이프라인 |
+| [legalize-kr/compiler](https://github.com/legalize-kr/compiler) | `.cache` → bare Git 저장소 컴파일러 |
+| [legalize-kr/cli-tools](https://github.com/legalize-kr/cli-tools) | 공공 데이터 CLI 및 MCP 도구 |
+| [legalize-kr/legalize-web](https://github.com/legalize-kr/legalize-web) | 웹사이트 ([legalize.kr](https://legalize.kr)) |
 
 ## 데이터 출처
 

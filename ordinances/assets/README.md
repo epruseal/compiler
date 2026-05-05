@@ -1,4 +1,4 @@
-# Ordinance KR
+# 대한민국 자치법규 저장소
 
 대한민국 자치법규를 Git 저장소로 관리합니다. 각 자치법규는 Markdown 파일이고, 지방자치단체·자치법규 종류·자치법규명 기준으로 배치됩니다.
 
@@ -25,7 +25,13 @@ grep -rl "공공시설" .
 ## 구조
 
 ```text
-{광역}/{기초 또는 _본청 또는 _교육청}/{자치법규종류}/{자치법규명}/본문.md
+{광역}/
+  {기초 또는 _본청 또는 _교육청}/
+    {자치법규종류}/
+      {자치법규명}/
+        본문.md
+      {자치법규명}_{공포번호 또는 자치법규ID}/
+        본문.md
 ```
 
 예:
@@ -67,6 +73,21 @@ grep -rl "공공시설" .
 ```
 
 `본문출처: parsing-failed`인 문서는 국가법령정보센터 XML에 조문 또는 부칙 본문이 없고, 별표·첨부파일만 제공되거나 원천 XML에 본문이 비어 있는 경우입니다.
+
+## 관련 저장소
+
+Legalize-KR은 수집·컴파일러·결과 저장소를 분리해 관리합니다.
+
+| 저장소 | 설명 |
+|--------|------|
+| [legalize-kr/legalize-kr](https://github.com/legalize-kr/legalize-kr) | 법령 데이터 |
+| [legalize-kr/precedent-kr](https://github.com/legalize-kr/precedent-kr) | 판례 데이터 |
+| [legalize-kr/admrule-kr](https://github.com/legalize-kr/admrule-kr) | 행정규칙 데이터 |
+| [legalize-kr/ordinance-kr](https://github.com/legalize-kr/ordinance-kr) | 자치법규 데이터 (현재 저장소) |
+| [legalize-kr/legalize-pipeline](https://github.com/legalize-kr/legalize-pipeline) | 공공 데이터 수집 및 캐시 갱신 파이프라인 |
+| [legalize-kr/compiler](https://github.com/legalize-kr/compiler) | `.cache` → bare Git 저장소 컴파일러 |
+| [legalize-kr/cli-tools](https://github.com/legalize-kr/cli-tools) | 공공 데이터 CLI 및 MCP 도구 |
+| [legalize-kr/legalize-web](https://github.com/legalize-kr/legalize-web) | 웹사이트 ([legalize.kr](https://legalize.kr)) |
 
 ## 데이터 출처
 

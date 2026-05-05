@@ -20,12 +20,16 @@ compiler/
 └── precedents/        # 판례 컴파일러 (binary: precedent-kr-compiler)
 ```
 
-멤버별 사용 문서와 생성 저장소 README 원본은 다음 위치에 있습니다:
+멤버별 README는 역할이 다릅니다. `*/README.md`는 컴파일러 사용·개발 문서이고,
+`*/assets/README.md`는 컴파일 결과 저장소의 루트 `README.md`로 포함되는
+원본입니다.
 
-- 법령 컴파일러: [`laws/README.md`](laws/README.md)
-- 판례 컴파일러: [`precedents/README.md`](precedents/README.md)
-- 행정규칙 결과 README: [`admrules/assets/README.md`](admrules/assets/README.md)
-- 자치법규 결과 README: [`ordinances/assets/README.md`](ordinances/assets/README.md)
+| 도메인 | 컴파일러 README | 결과 저장소 README 원본 |
+|--------|-----------------|--------------------------|
+| 법령 | [`laws/README.md`](laws/README.md) | [`laws/assets/README.md`](laws/assets/README.md) |
+| 판례 | [`precedents/README.md`](precedents/README.md) | [`precedents/assets/README.md`](precedents/assets/README.md) |
+| 행정규칙 | [`admrules/README.md`](admrules/README.md) | [`admrules/assets/README.md`](admrules/assets/README.md) |
+| 자치법규 | [`ordinances/README.md`](ordinances/README.md) | [`ordinances/assets/README.md`](ordinances/assets/README.md) |
 
 ## 빠른 시작
 
@@ -40,11 +44,21 @@ cargo build --workspace --release
 ./target/release/precedent-kr-compiler ../.cache/precedent -o ./precedent-output.git
 
 # 행정규칙 컴파일
-./target/release/admrule-kr-compiler ../.cache/admrule -o ./admrule-output.git --bare
+./target/release/admrule-kr-compiler ../.cache/admrule -o ./admrule-output.git
 
 # 자치법규 컴파일
-./target/release/ordinance-kr-compiler ../.cache/ordinance -o ./ordinance-output.git --bare
+./target/release/ordinance-kr-compiler ../.cache/ordinance -o ./ordinance-output.git
+
+# 공통 점검/메타데이터 옵션
+./target/release/legalize-kr-compiler ../.cache --validate
+./target/release/precedent-kr-compiler ../.cache/precedent --manifest ./manifest.json
 ```
+
+네 컴파일러 모두 기본 출력은 bare Git 저장소이며, `-o/--output`을 생략하면
+`output.git`에 씁니다. `--validate`는 저장소를 쓰지 않고 JSON 점검 결과만
+표준 출력으로 내보내며, `--manifest`는 빌드 결과의 `HEAD`와 엔트리 수를 JSON으로
+기록합니다. 행정규칙/자치법규 컴파일러의 기존 Markdown tree 출력은
+`--tree`로 사용할 수 있습니다.
 
 ## CI 4종 게이트
 

@@ -1,4 +1,4 @@
-# Precedent KR
+# 대한민국 판례 저장소
 
 대한민국 판례를 Git 저장소로 관리합니다. 각 판례는 Markdown 파일이고, 각 판례의 선고일자가 Git commit date로 기록됩니다.
 
@@ -37,7 +37,10 @@ git log --all --grep="판례일련번호: 145683"
 ## 구조
 
 ```
-{사건종류}/{법원등급}/{법원명}_{선고일자}_{사건번호}.md
+{사건종류}/
+  {법원등급}/
+    {법원명}_{선고일자}_{사건번호}.md
+    {법원명}_{선고일자}_{사건번호}_{판례일련번호}.md
 ```
 
 예: `민사/대법원/대법원_2002-09-27_2000다10048.md`,
@@ -172,17 +175,20 @@ git log --all --grep="판례일련번호: 145683"
 
 > **원본(단기) 주의**: 일부 판례에서는 월/일 표기는 이미 서기 기준이지만 연도만 단기로 기록되어 있어 `단기 연도 − 2333 = 서기 연도` 변환 후에도 실제 선고일과 ±1년 차이가 발생할 수 있습니다(예: 판례일련번호 232143은 원본이 `4291-02-21`인데, 단기 4291년은 서기 1958년이지만 원본 1차 자료는 1957년 판결일 가능성이 있음). 정확한 실선고일은 판례 본문을 확인하세요.
 
-## 저장소 구조
+## 관련 저장소
 
-이 프로젝트는 여러 저장소로 구성되어 있습니다:
+Legalize-KR은 수집·컴파일러·결과 저장소를 분리해 관리합니다.
 
 | 저장소 | 설명 |
 |--------|------|
 | [legalize-kr/legalize-kr](https://github.com/legalize-kr/legalize-kr) | 법령 데이터 |
-| [legalize-kr/legalize-pipeline](https://github.com/legalize-kr/legalize-pipeline) | 법령·판례 수집/변환/검증 파이프라인 |
-| [legalize-kr/legalize-web](https://github.com/legalize-kr/legalize-web) | 웹사이트 ([legalize.kr](https://legalize.kr)) |
 | [legalize-kr/precedent-kr](https://github.com/legalize-kr/precedent-kr) | 판례 데이터 (현재 저장소) |
-| [legalize-kr/compiler](https://github.com/legalize-kr/compiler) | `.cache` → bare Git repo 컴파일러 (Rust) |
+| [legalize-kr/admrule-kr](https://github.com/legalize-kr/admrule-kr) | 행정규칙 데이터 |
+| [legalize-kr/ordinance-kr](https://github.com/legalize-kr/ordinance-kr) | 자치법규 데이터 |
+| [legalize-kr/legalize-pipeline](https://github.com/legalize-kr/legalize-pipeline) | 공공 데이터 수집 및 캐시 갱신 파이프라인 |
+| [legalize-kr/compiler](https://github.com/legalize-kr/compiler) | `.cache` → bare Git 저장소 컴파일러 |
+| [legalize-kr/cli-tools](https://github.com/legalize-kr/cli-tools) | 공공 데이터 CLI 및 MCP 도구 |
+| [legalize-kr/legalize-web](https://github.com/legalize-kr/legalize-web) | 웹사이트 ([legalize.kr](https://legalize.kr)) |
 
 ## 데이터 출처
 

@@ -1,4 +1,4 @@
-# Legalize KR
+# 대한민국 법령 저장소
 
 대한민국 법령을 Git 저장소로 관리합니다. 각 법령은 Markdown 파일이고, 각 개정은 실제 공포일자를 가진 Git commit입니다.
 
@@ -31,17 +31,19 @@ git log --before="2025-01-01" -1 -- kr/민법/법률.md
 ## 구조
 
 ```
-kr/{법령명}/
-  법률.md          # 국회에서 제정하는 법률
-  시행령.md        # 법률의 시행령 (대통령령의 일종)
-  시행규칙.md      # 법률의 시행규칙 (부령)
-  대통령령.md      # 독립 대통령령 (규정, 직제 등 — 부모 법률 없음)
+kr/
+  {법령명}/
+    {법령구분}.md
+    시행령.md
+    시행규칙.md
+    {파일명}({법령구분}).md
 ```
 
 디렉토리명은 법령명에서 띄어쓰기를 제거하여 사용합니다 (예: `민법`, `친일반민족행위자재산의국가귀속에관한특별법`). 이는 [법령 홈페이지](https://www.law.go.kr)의 URL 규칙과 동일합니다.
 
 관련 법령(법률, 시행령, 시행규칙)이 하나의 디렉토리에 함께 관리됩니다.
 시행령과 독립 대통령령 모두 법적으로는 "대통령령"이지만, 시행령은 부모 법률이 있고(`{법률명} 시행령`), 독립 대통령령은 부모 법률 없이 단독으로 존재합니다.
+동일한 구조 경로를 서로 다른 `법령ID`가 공유하면 `파일명(법령구분).md` 형식으로 충돌을 해소합니다.
 
 예시:
 - `kr/민법/법률.md`: 민법
@@ -57,6 +59,7 @@ kr/{법령명}/
 | `{법률명} 시행령` | `kr/{법률명(띄어쓰기 제거)}/` | `시행령.md` |
 | `{법률명} 시행규칙` | `kr/{법률명(띄어쓰기 제거)}/` | `시행규칙.md` |
 | 독립 대통령령 (규정, 직제 등) | `kr/{대통령령명(띄어쓰기 제거)}/` | `대통령령.md` |
+| 같은 경로를 다른 `법령ID`가 이미 사용 | 기존 디렉토리 | `{기본파일명}({법령구분}).md` |
 
 ## 메타데이터 (YAML Frontmatter)
 
@@ -113,14 +116,19 @@ kr/{법령명}/
 - `·` (U+00B7, Middle Dot) → `ㆍ` (U+318D, Hangul Letter Araea)로 정규화
 - 예: `10·27` → `10ㆍ27`
 
-## 저장소 구조
+## 관련 저장소
 
-이 프로젝트는 3개의 저장소로 구성되어 있습니다:
+Legalize-KR은 수집·컴파일러·결과 저장소를 분리해 관리합니다.
 
 | 저장소 | 설명 |
 |--------|------|
 | [legalize-kr/legalize-kr](https://github.com/legalize-kr/legalize-kr) | 법령 데이터 (현재 저장소) |
-| [legalize-kr/legalize-pipeline](https://github.com/legalize-kr/legalize-pipeline) | 법령 수집/변환/검증 파이프라인 |
+| [legalize-kr/precedent-kr](https://github.com/legalize-kr/precedent-kr) | 판례 데이터 |
+| [legalize-kr/admrule-kr](https://github.com/legalize-kr/admrule-kr) | 행정규칙 데이터 |
+| [legalize-kr/ordinance-kr](https://github.com/legalize-kr/ordinance-kr) | 자치법규 데이터 |
+| [legalize-kr/legalize-pipeline](https://github.com/legalize-kr/legalize-pipeline) | 공공 데이터 수집 및 캐시 갱신 파이프라인 |
+| [legalize-kr/compiler](https://github.com/legalize-kr/compiler) | `.cache` → bare Git 저장소 컴파일러 |
+| [legalize-kr/cli-tools](https://github.com/legalize-kr/cli-tools) | 공공 데이터 CLI 및 MCP 도구 |
 | [legalize-kr/legalize-web](https://github.com/legalize-kr/legalize-web) | 웹사이트 ([legalize.kr](https://legalize.kr)) |
 
 ## 데이터 출처
