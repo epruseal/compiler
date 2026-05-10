@@ -894,26 +894,110 @@ fn is_iso_date(value: &str) -> bool {
 
 /// Safe path component compatible with the Python pipeline.
 fn safe_path_part(value: &str) -> String {
-    let mut text = nfc(value)
-        .replace(['\\', '/', ':', '\0', '"', '\'', '<', '>'], " ")
-        .split_whitespace()
-        .collect::<Vec<_>>()
-        .join(" ");
-    while !text.is_empty() && text.len() > 180 {
-        text.pop();
+    safe_path_part_with_truncation_suffix(value, "")
+}
+
+fn safe_path_part_with_truncation_suffix(value: &str, suffix_on_truncate: &str) -> String {
+    let mut text = sanitized_path_text(value);
+    let mut suffix = if suffix_on_truncate.is_empty() {
+        String::new()
+    } else {
+        let suffix_part = safe_path_part(suffix_on_truncate);
+        if suffix_part == "_" {
+            String::new()
+        } else {
+            format!("_{suffix_part}")
+        }
+    };
+    while suffix.len() > 180 {
+        suffix.pop();
+    }
+    trim_windows_path_tail(&mut suffix);
+    if suffix == "_" {
+        suffix.clear();
+    }
+    if !suffix.is_empty() && text.len() > 180 {
+        let budget = 180usize.saturating_sub(suffix.len());
+        while !text.is_empty() && text.len() > budget {
+            text.pop();
+        }
+        trim_windows_path_tail(&mut text);
+        text.push_str(&suffix);
+    } else {
+        while !text.is_empty() && text.len() > 180 {
+            text.pop();
+        }
+        trim_windows_path_tail(&mut text);
     }
     if text.is_empty() {
         "_".to_string()
+    } else if is_windows_reserved_path_part(&text) {
+        format!("_{text}")
     } else {
         text
     }
+}
+
+fn sanitized_path_text(value: &str) -> String {
+    let sanitized: String = nfc(value)
+        .chars()
+        .map(|ch| {
+            if matches!(
+                ch,
+                '\\' | '/' | ':' | '\0' | '"' | '\'' | '<' | '>' | '|' | '?' | '*'
+            ) || ch.is_control()
+            {
+                ' '
+            } else {
+                ch
+            }
+        })
+        .collect();
+    let mut text = sanitized.split_whitespace().collect::<Vec<_>>().join(" ");
+    trim_windows_path_tail(&mut text);
+    text
+}
+
+fn trim_windows_path_tail(text: &mut String) {
+    while text.ends_with([' ', '.']) {
+        text.pop();
+    }
+}
+
+fn is_windows_reserved_path_part(value: &str) -> bool {
+    let stem = value.split('.').next().unwrap_or(value);
+    matches!(
+        stem.to_ascii_uppercase().as_str(),
+        "CON"
+            | "PRN"
+            | "AUX"
+            | "NUL"
+            | "COM1"
+            | "COM2"
+            | "COM3"
+            | "COM4"
+            | "COM5"
+            | "COM6"
+            | "COM7"
+            | "COM8"
+            | "COM9"
+            | "LPT1"
+            | "LPT2"
+            | "LPT3"
+            | "LPT4"
+            | "LPT5"
+            | "LPT6"
+            | "LPT7"
+            | "LPT8"
+            | "LPT9"
+    )
 }
 
 /// Compute repository path with collision suffixing.
 fn admrule_path(rule: &Admrule, registry: &mut PathRegistry) -> PathBuf {
     let org_parts = admrule_org_path_parts(rule);
     let rule_type = safe_path_part(&rule.rule_type);
-    let name = safe_path_part(&rule.name);
+    let name = safe_path_part_with_truncation_suffix(&rule.name, &rule.serial);
     let prefix = org_parts.join("/");
     let base = format!("{prefix}/{rule_type}/{name}/본문.md");
     if claim_path(registry, &base, &rule.serial) {
@@ -1139,6 +1223,41 @@ mod tests {
             admrule_path(&other, &mut registry),
             PathBuf::from("행정안전부/_본부/고시/같은 이름_제3호/본문.md")
         );
+    }
+
+    #[test]
+    fn safe_path_part_uses_windows_safe_components() {
+        assert_eq!(safe_path_part("테스트 고시."), "테스트 고시");
+        assert_eq!(safe_path_part("NUL.txt"), "_NUL.txt");
+        assert_eq!(safe_path_part("A|B?C*D"), "A B C D");
+        assert_eq!(
+            safe_path_part(&format!("{} {}", "가".repeat(59), "나")),
+            "가".repeat(59)
+        );
+        let truncated = safe_path_part_with_truncation_suffix(&"가".repeat(70), "123");
+        assert!(truncated.ends_with("_123"));
+        assert!(truncated.len() <= 180);
+    }
+
+    #[test]
+    fn admrule_path_distinguishes_truncated_same_prefix_names() {
+        let long_name = "가".repeat(70);
+        let first = parse_admrule(
+            format!("<AdmRulService><행정규칙일련번호>1</행정규칙일련번호><행정규칙명>{long_name}</행정규칙명><행정규칙종류>고시</행정규칙종류><소관부처명>행정안전부</소관부처명></AdmRulService>").as_bytes(),
+            "1",
+        )
+        .unwrap();
+        let second = parse_admrule(
+            format!("<AdmRulService><행정규칙일련번호>2</행정규칙일련번호><행정규칙명>{long_name}</행정규칙명><행정규칙종류>고시</행정규칙종류><소관부처명>행정안전부</소관부처명></AdmRulService>").as_bytes(),
+            "2",
+        )
+        .unwrap();
+        let mut registry = PathRegistry::new();
+        let first_path = admrule_path(&first, &mut registry);
+        let second_path = admrule_path(&second, &mut registry);
+        assert_ne!(first_path, second_path);
+        assert!(first_path.to_string_lossy().contains("_1/본문.md"));
+        assert!(second_path.to_string_lossy().contains("_2/본문.md"));
     }
 
     #[test]
