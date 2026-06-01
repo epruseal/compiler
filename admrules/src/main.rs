@@ -258,6 +258,32 @@ struct ImportEntry {
 
 type PathRegistry = BTreeMap<String, String>;
 
+#[derive(Debug, Clone)]
+struct XmlNode {
+    name: String,
+    text: String,
+    children: Vec<XmlNode>,
+}
+
+impl XmlNode {
+    fn new(name: String) -> Self {
+        Self {
+            name,
+            text: String::new(),
+            children: Vec::new(),
+        }
+    }
+
+    fn first_descendant_text(&self, names: &[&str]) -> Option<&str> {
+        if names.contains(&self.name.as_str()) && !self.text.trim().is_empty() {
+            return Some(self.text.trim());
+        }
+        self.children
+            .iter()
+            .find_map(|child| child.first_descendant_text(names))
+    }
+}
+
 fn render_admrule_entries(cache_dir: &Path, limit: Option<usize>) -> Result<Vec<ImportEntry>> {
     let mut files = read_xml_files(cache_dir)?;
     if let Some(limit) = limit {
@@ -505,55 +531,54 @@ fn collect_body(fields: &BTreeMap<String, Vec<String>>, keys: &[&str]) -> String
 
 /// Extract structured 별표 download links without writing binary files.
 fn collect_attachments(raw: &[u8]) -> Result<Vec<Attachment>> {
+    let root = parse_xml_tree(raw)?;
+    let mut nodes = Vec::new();
+    collect_attachment_nodes(&root, &mut nodes);
+
+    Ok(nodes
+        .iter()
+        .enumerate()
+        .filter_map(|(index, node)| attachment_from_node(node, index))
+        .collect())
+}
+
+fn parse_xml_tree(raw: &[u8]) -> Result<XmlNode> {
     let mut reader = Reader::from_reader(raw);
     reader.config_mut().trim_text(true);
-    let mut fields: BTreeMap<String, String> = BTreeMap::new();
-    let mut attachments = Vec::new();
-    let mut current = String::new();
-    let mut in_attachment = false;
-    let mut attachment_root = String::new();
-    let mut depth = 0usize;
+    let mut stack: Vec<XmlNode> = Vec::new();
+    let mut root = None;
 
     loop {
         match reader.read_event()? {
             Event::Start(event) => {
                 let tag = String::from_utf8_lossy(event.name().as_ref()).to_string();
-                if !in_attachment && matches!(tag.as_str(), "별표" | "별표단위") {
-                    in_attachment = true;
-                    attachment_root = tag;
-                    depth = 1;
-                    fields.clear();
-                    current.clear();
-                } else if in_attachment {
-                    depth += 1;
-                    current = tag;
-                }
+                stack.push(XmlNode::new(tag));
             }
-            Event::Text(text) if in_attachment && !current.is_empty() => {
-                let value = nfc(text.decode()?.trim());
-                if !value.is_empty() {
-                    fields.entry(current.clone()).or_insert(value);
-                }
-            }
-            Event::CData(text) if in_attachment && !current.is_empty() => {
-                let value = nfc(text.decode()?.trim());
-                if !value.is_empty() {
-                    fields.entry(current.clone()).or_insert(value);
-                }
-            }
-            Event::End(event) if in_attachment => {
+            Event::Empty(event) => {
                 let tag = String::from_utf8_lossy(event.name().as_ref()).to_string();
-                if depth == 1 && tag == attachment_root {
-                    if let Some(attachment) = attachment_from_fields(&fields, attachments.len()) {
-                        attachments.push(attachment);
-                    }
-                    in_attachment = false;
-                    attachment_root.clear();
-                    current.clear();
-                    depth = 0;
+                let node = XmlNode::new(tag);
+                if let Some(parent) = stack.last_mut() {
+                    parent.children.push(node);
                 } else {
-                    depth = depth.saturating_sub(1);
-                    current.clear();
+                    root = Some(node);
+                }
+            }
+            Event::Text(text) => {
+                if let Some(node) = stack.last_mut() {
+                    node.text.push_str(&text.decode()?);
+                }
+            }
+            Event::CData(text) => {
+                if let Some(node) = stack.last_mut() {
+                    node.text.push_str(&text.decode()?);
+                }
+            }
+            Event::End(_) => {
+                let node = stack.pop().context("unexpected end tag")?;
+                if let Some(parent) = stack.last_mut() {
+                    parent.children.push(node);
+                } else {
+                    root = Some(node);
                 }
             }
             Event::Eof => break,
@@ -561,34 +586,62 @@ fn collect_attachments(raw: &[u8]) -> Result<Vec<Attachment>> {
         }
     }
 
-    Ok(attachments)
+    root.context("missing XML root")
 }
 
-fn attachment_from_fields(fields: &BTreeMap<String, String>, index: usize) -> Option<Attachment> {
+fn collect_attachment_nodes<'a>(node: &'a XmlNode, out: &mut Vec<&'a XmlNode>) {
+    if node.name == "별표" {
+        let before = out.len();
+        collect_bylaw_units(node, out);
+        if out.len() == before {
+            out.push(node);
+        }
+        return;
+    }
+    if node.name == "별표단위" {
+        out.push(node);
+        return;
+    }
+    for child in &node.children {
+        collect_attachment_nodes(child, out);
+    }
+}
+
+fn collect_bylaw_units<'a>(node: &'a XmlNode, out: &mut Vec<&'a XmlNode>) {
+    for child in &node.children {
+        if child.name == "별표단위" {
+            out.push(child);
+        } else {
+            collect_bylaw_units(child, out);
+        }
+    }
+}
+
+fn attachment_from_node(node: &XmlNode, index: usize) -> Option<Attachment> {
     let file_link = absolute_law_url(first_attachment(
-        fields,
+        node,
         &["별표서식파일링크", "별표파일링크"],
     ));
     let pdf_link = absolute_law_url(first_attachment(
-        fields,
+        node,
         &["별표서식PDF파일링크", "별표PDF파일링크"],
     ));
     if file_link.is_empty() && pdf_link.is_empty() {
         return None;
     }
     Some(Attachment {
-        bylaw_no: first_attachment(fields, &["별표번호"])
+        bylaw_no: first_attachment(node, &["별표번호"])
             .filter(|value| !value.is_empty())
             .map(ToOwned::to_owned)
             .unwrap_or_else(|| format!("별표 {}", index + 1)),
-        branch_no: first_attachment(fields, &["별표가지번호"])
+        branch_no: first_attachment(node, &["별표가지번호"])
             .unwrap_or("")
             .to_string(),
-        kind: first_attachment(fields, &["별표구분"])
+        kind: first_attachment(node, &["별표구분"])
             .filter(|value| !value.is_empty())
             .unwrap_or("별표")
             .to_string(),
-        title: first_attachment(fields, &["별표제목", "별표명"])
+        title: first_attachment(node, &["별표제목", "별표명"])
             .unwrap_or("")
             .to_string(),
         file_link,
@@ -596,9 +649,8 @@ fn attachment_from_fields(fields: &BTreeMap<String, String>, index: usize) -> Op
     })
 }
 
-fn first_attachment<'a>(fields: &'a BTreeMap<String, String>, keys: &[&str]) -> Option<&'a str> {
-    keys.iter()
-        .find_map(|key| fields.get(*key).map(String::as_str))
+fn first_attachment<'a>(node: &'a XmlNode, keys: &[&str]) -> Option<&'a str> {
+    node.first_descendant_text(keys)
 }
 
 fn absolute_law_url(value: Option<&str>) -> String {
@@ -1282,6 +1334,31 @@ mod tests {
         assert!(markdown.contains("첨부파일:\n- 별표번호: '0001'"));
         assert!(markdown.contains("파일링크: 'https://www.law.go.kr/LSW/flDownload.do?flSeq=1'"));
         assert!(markdown.contains("PDF링크: 'https://www.law.go.kr/LSW/flDownload.do?flSeq=2'"));
+    }
+
+    #[test]
+    fn parses_all_bylaw_unit_attachment_links() {
+        let xml = "<AdmRulService><행정규칙일련번호>123</행정규칙일련번호><행정규칙명>첨부 고시</행정규칙명><행정규칙종류>고시</행정규칙종류><소관부처명>행정안전부</소관부처명><발령일자>20240504</발령일자><조문내용>제1조 목적</조문내용><별표><별표단위><별표번호>0001</별표번호><별표가지번호>00</별표가지번호><별표구분>별표</별표구분><별표제목><![CDATA[수수료]]></별표제목><별표서식파일링크>/LSW/flDownload.do?flSeq=1</별표서식파일링크></별표단위><별표단위><별표번호>0001</별표번호><별표가지번호>01</별표가지번호><별표구분>별지</별표구분><별표제목><![CDATA[신청서]]></별표제목><별표서식PDF파일링크>/LSW/flDownload.do?flSeq=2</별표서식PDF파일링크></별표단위></별표></AdmRulService>";
+        let rule = parse_admrule(xml.as_bytes(), "123").unwrap();
+
+        assert_eq!(rule.attachments.len(), 2);
+        assert_eq!(rule.attachments[0].bylaw_no, "0001");
+        assert_eq!(rule.attachments[0].branch_no, "00");
+        assert_eq!(
+            rule.attachments[0].file_link,
+            "https://www.law.go.kr/LSW/flDownload.do?flSeq=1"
+        );
+        assert_eq!(rule.attachments[1].bylaw_no, "0001");
+        assert_eq!(rule.attachments[1].branch_no, "01");
+        assert_eq!(rule.attachments[1].kind, "별지");
+        assert_eq!(
+            rule.attachments[1].pdf_link,
+            "https://www.law.go.kr/LSW/flDownload.do?flSeq=2"
+        );
+
+        let markdown = render_markdown(&rule);
+        assert_eq!(markdown.matches("\n- 별표번호:").count(), 2);
+        assert!(markdown.contains("별표가지번호: '01'"));
     }
 
     #[test]

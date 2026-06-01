@@ -17,12 +17,21 @@ const SAMPLE_XML: &str = r#"<AdmRulService>
   <현행연혁구분>현행</현행연혁구분>
   <조문내용>제1조 목적</조문내용>
   <별표>
-    <별표번호>0001</별표번호>
-    <별표가지번호>00</별표가지번호>
-    <별표구분>별표</별표구분>
-    <별표제목><![CDATA[수수료]]></별표제목>
-    <별표서식파일링크>/LSW/flDownload.do?flSeq=1</별표서식파일링크>
-    <별표서식PDF파일링크>/LSW/flDownload.do?flSeq=2</별표서식PDF파일링크>
+    <별표단위>
+      <별표번호>0001</별표번호>
+      <별표가지번호>00</별표가지번호>
+      <별표구분>별표</별표구분>
+      <별표제목><![CDATA[수수료]]></별표제목>
+      <별표서식파일링크>/LSW/flDownload.do?flSeq=1</별표서식파일링크>
+      <별표서식PDF파일링크>/LSW/flDownload.do?flSeq=2</별표서식PDF파일링크>
+    </별표단위>
+    <별표단위>
+      <별표번호>0001</별표번호>
+      <별표가지번호>01</별표가지번호>
+      <별표구분>별지</별표구분>
+      <별표제목><![CDATA[신청서]]></별표제목>
+      <별표서식파일링크>/LSW/flDownload.do?flSeq=3</별표서식파일링크>
+    </별표단위>
   </별표>
 </AdmRulService>"#;
 
@@ -59,6 +68,7 @@ fn fixture_matches_python_pipeline_converter() {
         .unwrap_or_else(|err| panic!("read {}: {err}", actual_path.display()));
 
     assert!(actual_markdown.contains("본문출처: 'api-text'"));
+    assert_eq!(actual_markdown.matches("\n- 별표번호:").count(), 2);
     for legacy_key in [
         "source_url:",
         "body_source:",
