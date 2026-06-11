@@ -158,6 +158,101 @@ enum PlanOutcome {
     },
 }
 
+/// Returns the stable key used to group revisions of the same law.
+fn lineage_key(entry: &PlannedEntry) -> String {
+    if entry.metadata.law_id.is_empty() {
+        format!("mst:{}", entry.mst)
+    } else {
+        format!("id:{}", entry.metadata.law_id)
+    }
+}
+
+/// Compares planned entries in canonical commit order.
+fn planned_entry_cmp(left: &PlannedEntry, right: &PlannedEntry) -> std::cmp::Ordering {
+    left.metadata
+        .promulgation_date
+        .cmp(&right.metadata.promulgation_date)
+        .then_with(|| left.metadata.law_name.cmp(&right.metadata.law_name))
+        .then_with(|| {
+            left.metadata
+                .promulgation_number
+                .parse::<u64>()
+                .unwrap_or_else(|error| {
+                    panic!(
+                        "cache 공포번호 must be numeric: {}: {error:?}",
+                        left.source_path.display()
+                    )
+                })
+                .cmp(
+                    &right
+                        .metadata
+                        .promulgation_number
+                        .parse::<u64>()
+                        .unwrap_or_else(|error| {
+                            panic!(
+                                "cache 공포번호 must be numeric: {}: {error:?}",
+                                right.source_path.display()
+                            )
+                        }),
+                )
+        })
+        .then_with(|| {
+            left.mst
+                .parse::<u64>()
+                .expect("detail xml filenames must be numeric MSTs")
+                .cmp(
+                    &right
+                        .mst
+                        .parse::<u64>()
+                        .expect("detail xml filenames must be numeric MSTs"),
+                )
+        })
+}
+
+/// Assigns output paths so each 법령ID lineage uses its latest law title.
+fn assign_current_paths(entries: &mut [PlannedEntry]) {
+    let mut latest_by_lineage: HashMap<String, usize> = HashMap::default();
+    let mut lineage_order = Vec::new();
+
+    for (index, entry) in entries.iter().enumerate() {
+        let lineage = lineage_key(entry);
+        match latest_by_lineage.entry(lineage.clone()) {
+            std::collections::hash_map::Entry::Vacant(slot) => {
+                lineage_order.push(lineage);
+                slot.insert(index);
+            }
+            std::collections::hash_map::Entry::Occupied(mut slot) => {
+                let latest_index = *slot.get();
+                if planned_entry_cmp(&entries[latest_index], entry).is_lt() {
+                    slot.insert(index);
+                }
+            }
+        }
+    }
+
+    let mut registry = PathRegistry::default();
+    let mut path_by_lineage = HashMap::default();
+    for lineage in lineage_order {
+        let latest_index = latest_by_lineage[&lineage];
+        let entry = &entries[latest_index];
+        let (path, kind) = registry.get_law_path(
+            &entry.metadata.law_name,
+            &entry.metadata.law_type,
+            &entry.metadata.law_id,
+        );
+        path_by_lineage.insert(lineage, (path, kind));
+    }
+
+    for entry in entries {
+        let lineage = lineage_key(entry);
+        let (path, kind) = path_by_lineage
+            .get(&lineage)
+            .expect("every planned entry must have a lineage path");
+        entry.path = path.clone();
+        entry.kind = kind.clone();
+    }
+}
+
 /// Plans the ordered entry list and collects planning-time diagnostics.
 ///
 /// Extracted from [`run`] so tests can drive pass-1 output without running the full build.
@@ -268,57 +363,8 @@ fn plan_and_diagnose(cache_dir: &Path) -> Result<(Vec<PlannedEntry>, Diagnostics
         }
     }
 
-    entries.sort_by(|left, right| {
-        left.metadata
-            .promulgation_date
-            .cmp(&right.metadata.promulgation_date)
-            .then_with(|| left.metadata.law_name.cmp(&right.metadata.law_name))
-            .then_with(|| {
-                left.metadata
-                    .promulgation_number
-                    .parse::<u64>()
-                    .unwrap_or_else(|error| {
-                        panic!(
-                            "cache 공포번호 must be numeric: {}: {error:?}",
-                            left.source_path.display()
-                        )
-                    })
-                    .cmp(
-                        &right
-                            .metadata
-                            .promulgation_number
-                            .parse::<u64>()
-                            .unwrap_or_else(|error| {
-                                panic!(
-                                    "cache 공포번호 must be numeric: {}: {error:?}",
-                                    right.source_path.display()
-                                )
-                            }),
-                    )
-            })
-            .then_with(|| {
-                left.mst
-                    .parse::<u64>()
-                    .expect("detail xml filenames must be numeric MSTs")
-                    .cmp(
-                        &right
-                            .mst
-                            .parse::<u64>()
-                            .expect("detail xml filenames must be numeric MSTs"),
-                    )
-            })
-    });
-
-    let mut registry = PathRegistry::default();
-    for entry in &mut entries {
-        let (path, kind) = registry.get_law_path(
-            &entry.metadata.law_name,
-            &entry.metadata.law_type,
-            &entry.metadata.law_id,
-        );
-        entry.path = path;
-        entry.kind = kind;
-    }
+    entries.sort_by(planned_entry_cmp);
+    assign_current_paths(&mut entries);
 
     //
     // Cross-reference root laws to catch 시행령/시행규칙 children whose parent 법률 is absent.
@@ -657,6 +703,27 @@ mod tests {
 </법령>
 "#;
 
+    const SAMPLE_XML_RENAMED: &str = r#"<?xml version="1.0" encoding="UTF-8"?>
+<법령>
+  <기본정보>
+    <법령ID>000001</법령ID>
+    <공포일자>20250101</공포일자>
+    <공포번호>00003</공포번호>
+    <법종구분>법률</법종구분>
+    <법령명_한글><![CDATA[새테스트법]]></법령명_한글>
+    <시행일자>20250101</시행일자>
+    <연락부서><부서단위><소관부처명>법무부</소관부처명></부서단위></연락부서>
+  </기본정보>
+  <조문>
+    <조문단위>
+      <조문번호>3</조문번호>
+      <조문제목><![CDATA[개정]]></조문제목>
+      <조문내용><![CDATA[제3조 (개정) 테스트를 다시 개정한다.]]></조문내용>
+    </조문단위>
+  </조문>
+</법령>
+"#;
+
     fn write_sample_xml(detail_dir: &Path, mst: &str, xml: &str) {
         fs::write(detail_dir.join(format!("{mst}.xml")), xml).unwrap();
     }
@@ -689,6 +756,29 @@ mod tests {
         assert_eq!(
             entries[2].path,
             RepoPathBuf::kr_file("테스트법", "시행령.md")
+        );
+    }
+
+    #[test]
+    fn plan_entries_uses_latest_title_path_for_same_law_id() {
+        let temp = TempDir::new().unwrap();
+        let cache_dir = temp.path().join(".cache");
+        let detail_dir = cache_dir.join("detail");
+        fs::create_dir_all(&detail_dir).unwrap();
+        write_sample_xml(&detail_dir, "1", SAMPLE_XML_1);
+        write_sample_xml(&detail_dir, "3", SAMPLE_XML_RENAMED);
+
+        let (entries, _diagnostics) = plan_and_diagnose(&cache_dir).unwrap();
+        assert_eq!(entries.len(), 2);
+        assert_eq!(entries[0].mst, "1");
+        assert_eq!(entries[1].mst, "3");
+        assert_eq!(
+            entries[0].path,
+            RepoPathBuf::kr_file("새테스트법", "법률.md")
+        );
+        assert_eq!(
+            entries[1].path,
+            RepoPathBuf::kr_file("새테스트법", "법률.md")
         );
     }
 
