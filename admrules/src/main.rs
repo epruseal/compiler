@@ -105,6 +105,10 @@ struct Admrule {
     attachments: Vec<Attachment>,
     /// Body text.
     body: String,
+    /// 제개정이유.
+    amendment_reason: String,
+    /// 개정문.
+    amendment_doc: String,
 }
 
 /// Parsed 별표 attachment link.
@@ -485,6 +489,14 @@ fn parse_admrule(raw: &[u8], fallback_serial: &str) -> Result<Admrule> {
         current_history: first(&fields, &["현행연혁구분"]).unwrap_or("").to_string(),
         attachments,
         body,
+        amendment_reason: fields
+            .get("제개정이유내용")
+            .map(|values| values.iter().map(|v| nfc(v)).collect::<Vec<_>>().join("\n\n"))
+            .unwrap_or_default(),
+        amendment_doc: fields
+            .get("개정문내용")
+            .map(|values| values.iter().map(|v| nfc(v)).collect::<Vec<_>>().join("\n\n"))
+            .unwrap_or_default(),
     })
 }
 
@@ -1184,10 +1196,31 @@ fn render_markdown(rule: &Admrule) -> String {
     } else {
         "api-text"
     };
-    let body = if rule.body.trim().is_empty() {
-        "본문은 국가법령정보센터 원문 또는 첨부파일을 참조하세요.".to_string()
+    let mut body_text = if rule.body.trim().is_empty() {
+        String::new()
     } else {
         rule.body.trim().to_string()
+    };
+    let reason = rule.amendment_reason.trim();
+    if !reason.is_empty() {
+        if !body_text.trim().is_empty() {
+            body_text.push_str("\n\n");
+        }
+        body_text.push_str("## 제개정이유\n\n");
+        body_text.push_str(reason);
+    }
+    let doc = rule.amendment_doc.trim();
+    if !doc.is_empty() {
+        if !body_text.trim().is_empty() {
+            body_text.push_str("\n\n");
+        }
+        body_text.push_str("## 개정문\n\n");
+        body_text.push_str(doc);
+    }
+    let body = if body_text.trim().is_empty() {
+        "본문은 국가법령정보센터 원문 또는 첨부파일을 참조하세요.".to_string()
+    } else {
+        body_text.trim().to_string()
     };
     let original_ministry = if rule.original_ministry.is_empty() {
         String::new()

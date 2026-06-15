@@ -40,6 +40,9 @@ ordinance-kr-compiler ../.cache/ordinance --tree -o ./ordinance-tree
 2-pass로 동작합니다.
 
 1. `{cache_dir}/*.xml`의 자치법규 메타데이터와 본문을 읽어 entry를 만듭니다.
+   - 캐시 파일은 **개정 버전(MST, `자치법규일련번호`)마다 1개**입니다. 즉 같은
+     `자치법규ID`의 여러 개정본이 각각 별도 XML로 존재하며, entry는 파일명이 아니라
+     XML 내용의 `자치법규ID`로 동일 자치법규임을 식별합니다.
    - `조례`, `규칙`, `훈령`, `예규`, `고시`, `의회규칙`이 아닌 원천 분류는
      본문 트리에 쓰지 않고 건너뜁니다.
 2. `지자체기관명`을 광역·기초 단위로 나누어 저장소 경로를 결정합니다.
@@ -52,8 +55,10 @@ ordinance-kr-compiler ../.cache/ordinance --tree -o ./ordinance-tree
    - `자치법규ID asc (numeric)`
    - `출력 경로 asc`
 5. 정렬된 순서대로 Markdown과 commit message를 만들고 commit을 작성합니다.
-   같은 `자치법규ID`의 개정으로 경로가 바뀌면 이전 경로의 파일을 함께
-   삭제합니다.
+   **개정 버전마다 1개의 commit**이 생성되어 연혁이 보존됩니다(commit timestamp =
+   공포일자). 같은 `자치법규ID`의 개정으로 경로가 바뀌면 이전 경로의 파일을 함께
+   삭제해 최신 경로로 이어집니다. 경로가 그대로면 동일 `본문.md`에 개정 이력이
+   시간순으로 쌓입니다.
 
 ## 출력 특성
 

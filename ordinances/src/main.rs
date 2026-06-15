@@ -97,6 +97,10 @@ struct Ordinance {
     articles: Vec<Article>,
     /// Addenda text blocks.
     addenda: Vec<String>,
+    /// 제개정이유.
+    amendment_reason: String,
+    /// 개정문.
+    amendment_doc: String,
     /// Attachment links parsed from 별표 blocks.
     attachments: Vec<Attachment>,
 }
@@ -447,6 +451,14 @@ fn parse_ordinance(raw: &[u8], fallback_id: &str) -> Result<Ordinance> {
         addenda: fields
             .get("부칙내용")
             .map(|values| values.iter().map(|value| nfc(value)).collect())
+            .unwrap_or_default(),
+        amendment_reason: fields
+            .get("제개정이유내용")
+            .map(|values| values.iter().map(|v| nfc(v)).collect::<Vec<_>>().join("\n\n"))
+            .unwrap_or_default(),
+        amendment_doc: fields
+            .get("개정문내용")
+            .map(|values| values.iter().map(|v| nfc(v)).collect::<Vec<_>>().join("\n\n"))
             .unwrap_or_default(),
         attachments,
     })
@@ -936,6 +948,22 @@ fn render_markdown(ordinance: &Ordinance) -> String {
             body_text.push_str(content);
         }
     }
+    let reason = ordinance.amendment_reason.trim();
+    if !reason.is_empty() {
+        if !body_text.trim().is_empty() {
+            body_text.push_str("\n\n");
+        }
+        body_text.push_str("## 제개정이유\n\n");
+        body_text.push_str(reason);
+    }
+    let doc = ordinance.amendment_doc.trim();
+    if !doc.is_empty() {
+        if !body_text.trim().is_empty() {
+            body_text.push_str("\n\n");
+        }
+        body_text.push_str("## 개정문\n\n");
+        body_text.push_str(doc);
+    }
     let body = if body_text.trim().is_empty() {
         "본문은 첨부파일 또는 원문을 참조하세요.".to_string()
     } else {
@@ -1212,6 +1240,69 @@ mod tests {
         let files = git_stdout(&repo, ["ls-tree", "-r", "--name-only", "HEAD"]);
         assert!(files.contains("서울특별시/_본청/조례/새 조례/본문.md"));
         assert!(!files.contains("서울특별시/_본청/조례/이전 조례/본문.md"));
+    }
+
+    #[test]
+    fn bare_repo_keeps_one_commit_per_revision_of_same_ordinance() {
+        let temp = tempfile::tempdir().unwrap();
+        let cache = temp.path().join("cache");
+        fs::create_dir(&cache).unwrap();
+        // Three revisions of the same 자치법규ID with an unchanged name (and thus
+        // an unchanged path): each MST is its own cache file, so the compiler must
+        // emit one commit per revision at that single path.
+        for (mst, date, body) in [
+            ("10", "20200101", "제정 본문"),
+            ("20", "20210101", "1차개정 본문"),
+            ("30", "20220101", "2차개정 본문"),
+        ] {
+            fs::write(
+                cache.join(format!("{mst}.xml")),
+                format!(
+                    "<Ordin><자치법규ID>2000111</자치법규ID><자치법규일련번호>{mst}</자치법규일련번호><자치법규명>서울특별시 테스트 조례</자치법규명><자치법규종류>C0001</자치법규종류><지자체기관명>서울특별시</지자체기관명><공포일자>{date}</공포일자><공포번호>{mst}</공포번호><조문내용>{body}</조문내용></Ordin>"
+                ),
+            )
+            .unwrap();
+        }
+        let repo = temp.path().join("out.git");
+
+        compile_bare_repo(&cache, &repo, None).unwrap();
+
+        git_ok(&repo, ["fsck", "--full"]);
+        // 3 revisions + initial README commit.
+        assert_eq!(git_stdout(&repo, ["rev-list", "--count", "--all"]), "4");
+        let path = "서울특별시/_본청/조례/서울특별시 테스트 조례/본문.md";
+        // The single path accumulates all three revisions as history.
+        assert_eq!(
+            git_stdout(&repo, ["rev-list", "--count", "HEAD", "--", path]),
+            "3"
+        );
+        let head = git_stdout(&repo, ["show", &format!("HEAD:{path}")]);
+        assert!(head.contains("2차개정 본문"));
+        assert!(!head.contains("제정 본문"));
+    }
+
+    #[test]
+    fn bare_repo_handles_same_promulgation_date_revisions() {
+        let temp = tempfile::tempdir().unwrap();
+        let cache = temp.path().join("cache");
+        fs::create_dir(&cache).unwrap();
+        // Two revisions promulgated on the same day must not panic; the tiebreak
+        // falls to a deterministic order.
+        for (mst, body) in [("10", "본문 A"), ("20", "본문 B")] {
+            fs::write(
+                cache.join(format!("{mst}.xml")),
+                format!(
+                    "<Ordin><자치법규ID>2000111</자치법규ID><자치법규일련번호>{mst}</자치법규일련번호><자치법규명>서울특별시 테스트 조례</자치법규명><자치법규종류>C0001</자치법규종류><지자체기관명>서울특별시</지자체기관명><공포일자>20240101</공포일자><공포번호>{mst}</공포번호><조문내용>{body}</조문내용></Ordin>"
+                ),
+            )
+            .unwrap();
+        }
+        let repo = temp.path().join("out.git");
+
+        compile_bare_repo(&cache, &repo, None).unwrap();
+
+        git_ok(&repo, ["fsck", "--full"]);
+        assert_eq!(git_stdout(&repo, ["rev-list", "--count", "--all"]), "3");
     }
 
     #[test]
