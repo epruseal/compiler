@@ -298,10 +298,17 @@ fn render_admrule_entries(cache_dir: &Path, limit: Option<usize>) -> Result<Vec<
             path.file_stem().and_then(|s| s.to_str()).unwrap_or(""),
         )?;
         let rel = admrule_path(&rule, &mut registry);
+        // Group revisions of the same document by 행정규칙ID; fall back to
+        // serial when the field is absent (older or special rules).
+        let group_key = if rule.rule_id.is_empty() {
+            rule.serial.clone()
+        } else {
+            rule.rule_id.clone()
+        };
         entries.push(ImportEntry {
             path: rel.to_string_lossy().replace('\\', "/"),
             previous_path: None,
-            identity: rule.serial.clone(),
+            identity: group_key,
             content: render_markdown(&rule).into_bytes(),
             message: admrule_commit_message(&rule),
             timestamp: commit_timestamp(&rule.issue_date_raw)?,
@@ -1047,12 +1054,19 @@ fn is_windows_reserved_path_part(value: &str) -> bool {
 
 /// Compute repository path with collision suffixing.
 fn admrule_path(rule: &Admrule, registry: &mut PathRegistry) -> PathBuf {
+    // Use the same grouping key as render_admrule_entries so that all revisions
+    // of one document share a path (which is what makes git history accumulate).
+    let group_key = if rule.rule_id.is_empty() {
+        rule.serial.clone()
+    } else {
+        rule.rule_id.clone()
+    };
     let org_parts = admrule_org_path_parts(rule);
     let rule_type = safe_path_part(&rule.rule_type);
     let name = safe_path_part_with_truncation_suffix(&rule.name, &rule.serial);
     let prefix = org_parts.join("/");
     let base = format!("{prefix}/{rule_type}/{name}/본문.md");
-    if claim_path(registry, &base, &rule.serial) {
+    if claim_path(registry, &base, &group_key) {
         return PathBuf::from(base);
     }
     let first_suffix = if rule.issue_no.is_empty() {
@@ -1067,14 +1081,14 @@ fn admrule_path(rule: &Admrule, registry: &mut PathRegistry) -> PathBuf {
     ];
     for suffix in candidates {
         let suffixed = format!("{prefix}/{rule_type}/{name}_{suffix}/본문.md");
-        if claim_path(registry, &suffixed, &rule.serial) {
+        if claim_path(registry, &suffixed, &group_key) {
             return PathBuf::from(suffixed);
         }
     }
     let mut idx = 2usize;
     loop {
         let suffixed = format!("{prefix}/{rule_type}/{name}_{}_{idx}/본문.md", rule.serial);
-        if claim_path(registry, &suffixed, &rule.serial) {
+        if claim_path(registry, &suffixed, &group_key) {
             return PathBuf::from(suffixed);
         }
         idx += 1;
@@ -1251,20 +1265,23 @@ mod tests {
     }
 
     #[test]
-    fn path_registry_reuses_path_for_same_rule_serial_revisions() {
+    fn path_registry_reuses_path_for_same_rule_id_revisions() {
+        // Two revisions of the same document: different serial, same 행정규칙ID.
+        // Both must resolve to the same base path so git accumulates history.
         let first = parse_admrule(
-            "<AdmRulService><행정규칙일련번호>123</행정규칙일련번호><행정규칙명>같은 이름</행정규칙명><행정규칙종류>고시</행정규칙종류><소관부처명>행정안전부</소관부처명><발령번호>제1호</발령번호></AdmRulService>".as_bytes(),
-            "123",
+            "<AdmRulService><행정규칙일련번호>100</행정규칙일련번호><행정규칙ID>999</행정규칙ID><행정규칙명>같은 이름</행정규칙명><행정규칙종류>고시</행정규칙종류><소관부처명>행정안전부</소관부처명><발령번호>제1호</발령번호></AdmRulService>".as_bytes(),
+            "100",
         )
         .unwrap();
         let second = parse_admrule(
-            "<AdmRulService><행정규칙일련번호>123</행정규칙일련번호><행정규칙명>같은 이름</행정규칙명><행정규칙종류>고시</행정규칙종류><소관부처명>행정안전부</소관부처명><발령번호>제2호</발령번호></AdmRulService>".as_bytes(),
-            "123",
+            "<AdmRulService><행정규칙일련번호>200</행정규칙일련번호><행정규칙ID>999</행정규칙ID><행정규칙명>같은 이름</행정규칙명><행정규칙종류>고시</행정규칙종류><소관부처명>행정안전부</소관부처명><발령번호>제2호</발령번호></AdmRulService>".as_bytes(),
+            "200",
         )
         .unwrap();
+        // Different 행정규칙ID — must get a distinct path.
         let other = parse_admrule(
-            "<AdmRulService><행정규칙일련번호>456</행정규칙일련번호><행정규칙명>같은 이름</행정규칙명><행정규칙종류>고시</행정규칙종류><소관부처명>행정안전부</소관부처명><발령번호>제3호</발령번호></AdmRulService>".as_bytes(),
-            "456",
+            "<AdmRulService><행정규칙일련번호>300</행정규칙일련번호><행정규칙ID>888</행정규칙ID><행정규칙명>같은 이름</행정규칙명><행정규칙종류>고시</행정규칙종류><소관부처명>행정안전부</소관부처명><발령번호>제3호</발령번호></AdmRulService>".as_bytes(),
+            "300",
         )
         .unwrap();
         let mut registry = PathRegistry::new();
@@ -1275,6 +1292,27 @@ mod tests {
             admrule_path(&other, &mut registry),
             PathBuf::from("행정안전부/_본부/고시/같은 이름_제3호/본문.md")
         );
+    }
+
+    #[test]
+    fn path_registry_falls_back_to_serial_when_rule_id_absent() {
+        // Without 행정규칙ID, two distinct serials must not share a path.
+        let first = parse_admrule(
+            "<AdmRulService><행정규칙일련번호>100</행정규칙일련번호><행정규칙명>같은 이름</행정규칙명><행정규칙종류>고시</행정규칙종류><소관부처명>행정안전부</소관부처명><발령번호>제1호</발령번호></AdmRulService>".as_bytes(),
+            "100",
+        )
+        .unwrap();
+        let second = parse_admrule(
+            "<AdmRulService><행정규칙일련번호>200</행정규칙일련번호><행정규칙명>같은 이름</행정규칙명><행정규칙종류>고시</행정규칙종류><소관부처명>행정안전부</소관부처명><발령번호>제2호</발령번호></AdmRulService>".as_bytes(),
+            "200",
+        )
+        .unwrap();
+        assert!(first.rule_id.is_empty());
+        assert!(second.rule_id.is_empty());
+        let mut registry = PathRegistry::new();
+        let first_path = admrule_path(&first, &mut registry);
+        let second_path = admrule_path(&second, &mut registry);
+        assert_ne!(first_path, second_path, "distinct serials without rule_id must get distinct paths");
     }
 
     #[test]
