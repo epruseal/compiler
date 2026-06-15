@@ -358,7 +358,7 @@ pub fn precedent_to_markdown(detail: &PrecedentDetail) -> Result<Vec<u8>> {
         serial: &detail.metadata.serial,
         case_no: &detail.metadata.case_no,
         case_name: &case_name,
-        court_name: normalize_court_name(&detail.metadata.court_name),
+        court_name: normalize_court_name(detail.metadata.court_name.trim()),
         court_tier: court_tier_label(&detail.metadata.court_code),
         case_type: normalize_case_type(&detail.metadata.case_type_raw),
         source: format!(
@@ -697,6 +697,32 @@ mod tests {
         assert!(markdown.contains("## 판시사항"));
         assert!(markdown.contains("판시 본문"));
         assert!(!markdown.contains("## 참조조문"));
+    }
+
+    #[test]
+    fn frontmatter_trims_court_name_whitespace() {
+        for (raw_court_name, expected_court_name) in [
+            (" 대법원", "법원명: 대법원"),
+            ("\t\t대법원", "법원명: 대법원"),
+            (" 서울고법 ", "법원명: 서울고등법원"),
+        ] {
+            let detail = PrecedentDetail {
+                metadata: PrecedentMetadata {
+                    serial: String::from("145683"),
+                    case_no: String::from("2000므1257"),
+                    case_name: String::from("손해배상"),
+                    court_name: String::from(raw_court_name),
+                    court_code: String::from("400201"),
+                    judgment_date: String::from("20031114"),
+                    case_type_raw: String::from("가사"),
+                },
+                body: PrecedentBody::default(),
+            };
+            let markdown = String::from_utf8(precedent_to_markdown(&detail).unwrap()).unwrap();
+            assert!(markdown.contains(expected_court_name));
+            assert!(!markdown.contains("법원명: ' 대법원'"));
+            assert!(!markdown.contains("법원명: \"\\t\\t대법원\""));
+        }
     }
 
     #[test]
