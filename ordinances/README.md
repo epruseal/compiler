@@ -60,6 +60,35 @@ ordinance-kr-compiler ../.cache/ordinance --tree -o ./ordinance-tree
    삭제해 최신 경로로 이어집니다. 경로가 그대로면 동일 `본문.md`에 개정 이력이
    시간순으로 쌓입니다.
 
+## 출력 Markdown 구조
+
+본문 Markdown은 다음 섹션 순서로 구성됩니다.
+
+```
+---
+(frontmatter)
+---
+
+# {자치법규명}
+
+(본문 조문)
+
+## 부칙
+
+(부칙내용 — 없으면 섹션 생략)
+
+## 제개정이유
+
+(제개정이유내용 — 없으면 섹션 생략)
+
+## 개정문
+
+(개정문내용 — 없으면 섹션 생략)
+```
+
+`제개정이유내용`, `개정문내용`은 law.go.kr API의 MST 파라미터 응답에 포함되며,
+detail XML에 CDATA로 제공된다.
+
 ## 출력 특성
 
 - 매 실행마다 fresh bare repo를 새로 만듭니다.
