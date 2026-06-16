@@ -89,6 +89,12 @@ ordinance-kr-compiler ../.cache/ordinance --tree -o ./ordinance-tree
 `제개정이유내용`, `개정문내용`은 law.go.kr API의 MST 파라미터 응답에 포함되며,
 detail XML에 CDATA로 제공된다.
 
+## 알려진 제한
+
+law.go.kr nw=2 인덱스에 존재하지만 detail 조회가 불가능한 레코드가 일부 있다.
+2026-06-16 기준 전체 864,510건 중 165건(0.02%)이 이에 해당하며, 해당 MST는 캐시되지
+않아 컴파일 대상에서 자동 제외된다 (404 삭제 레코드 + 500 서버 오류).
+
 ## 출력 특성
 
 - 매 실행마다 fresh bare repo를 새로 만듭니다.
