@@ -7,7 +7,8 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context, Result};
 use clap::Parser;
 use git_writer::{
-    BareRepoWriter, GitTimestampKst, PreparedBlob, RepoPathBuf, hex, precompute_blob,
+    BareRepoWriter, GitTimestampKst, PreparedBlob, RepoPathBuf, escape_accidental_markdown_links,
+    hex, precompute_blob,
 };
 use quick_xml::Reader;
 use quick_xml::events::Event;
@@ -924,16 +925,16 @@ fn render_markdown(ordinance: &Ordinance) -> String {
     let mut body_text = if !articles.trim().is_empty() {
         articles
     } else {
-        ordinance.body.trim().to_string()
+        escape_accidental_markdown_links(ordinance.body.trim())
     };
     for addendum in &ordinance.addenda {
-        let content = addendum.trim();
+        let content = escape_accidental_markdown_links(addendum.trim());
         if !content.is_empty() {
             if !body_text.trim().is_empty() {
                 body_text.push_str("\n\n");
             }
             body_text.push_str("## 부칙\n\n");
-            body_text.push_str(content);
+            body_text.push_str(&content);
         }
     }
     let body = if body_text.trim().is_empty() {
@@ -1090,6 +1091,14 @@ mod tests {
         let markdown = render_markdown(&ordinance);
         assert!(markdown.contains("본문출처: 'api-text'"));
         assert!(markdown.contains("## 부칙\n\n이 조례는 공포한 날부터 시행한다."));
+    }
+
+    #[test]
+    fn render_markdown_escapes_accidental_markdown_links() {
+        let xml = "<Ordin><자치법규ID>1</자치법규ID><자치법규명>부칙 조례</자치법규명><자치법규종류>C0001</자치법규종류><지자체기관명>서울특별시</지자체기관명><부칙><부칙내용>[별표4](생략)을 적용한다.</부칙내용></부칙></Ordin>";
+        let ordinance = parse_ordinance(xml.as_bytes(), "1").unwrap();
+        let markdown = render_markdown(&ordinance);
+        assert!(markdown.contains("\\[별표4](생략)"));
     }
 
     #[test]

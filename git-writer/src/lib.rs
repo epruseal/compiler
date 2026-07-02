@@ -107,6 +107,63 @@ pub fn precompute_blob(content: &[u8]) -> ([u8; 20], Vec<u8>) {
     )
 }
 
+/// Escapes source prose that accidentally has relative Markdown-link syntax.
+///
+/// Legal source text often includes forms such as `[별표 3](일반직등)` as
+/// literal prose. Markdown would render those as broken relative links, so this
+/// keeps URL links intact and neutralizes only non-URL targets.
+pub fn escape_accidental_markdown_links(text: &str) -> String {
+    let bytes = text.as_bytes();
+    let mut output = String::with_capacity(text.len());
+    let mut cursor = 0;
+
+    while let Some(relative_start) = text[cursor..].find('[') {
+        let start = cursor + relative_start;
+        if start > 0 && matches!(bytes[start - 1], b'!' | b'\\') {
+            output.push_str(&text[cursor..=start]);
+            cursor = start + 1;
+            continue;
+        }
+
+        let label_start = start + 1;
+        let Some(relative_label_end) = text[label_start..].find(']') else {
+            break;
+        };
+        let label_end = label_start + relative_label_end;
+        if text[label_start..label_end].contains('\n') || !text[label_end..].starts_with("](") {
+            output.push_str(&text[cursor..=start]);
+            cursor = start + 1;
+            continue;
+        }
+
+        let target_start = label_end + 2;
+        let Some(relative_target_end) = text[target_start..].find(')') else {
+            break;
+        };
+        let target_end = target_start + relative_target_end;
+        let target = text[target_start..target_end].trim();
+        if target.contains('\n')
+            || target.starts_with("http://")
+            || target.starts_with("https://")
+            || target.starts_with("mailto:")
+            || target.starts_with("tel:")
+            || target.starts_with('#')
+        {
+            output.push_str(&text[cursor..=start]);
+            cursor = start + 1;
+            continue;
+        }
+
+        output.push_str(&text[cursor..start]);
+        output.push('\\');
+        output.push_str(&text[start..=target_end]);
+        cursor = target_end + 1;
+    }
+
+    output.push_str(&text[cursor..]);
+    output
+}
+
 /// Owned repository path rendered as a slash-separated Git path.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct RepoPathBuf {
@@ -1527,6 +1584,30 @@ mod tests {
             })
             .count();
         assert!(tree_deltas > 0, "expected at least one tree delta");
+    }
+
+    #[test]
+    fn escapes_accidental_markdown_links_only_for_relative_targets() {
+        assert_eq!(
+            escape_accidental_markdown_links("[별표 3](일반직등)을 적용한다."),
+            "\\[별표 3](일반직등)을 적용한다."
+        );
+        assert_eq!(
+            escape_accidental_markdown_links("[법령](https://example.test)을 본다."),
+            "[법령](https://example.test)을 본다."
+        );
+        assert_eq!(
+            escape_accidental_markdown_links("[조문](#제1조)을 본다."),
+            "[조문](#제1조)을 본다."
+        );
+        assert_eq!(
+            escape_accidental_markdown_links("![대체텍스트](image.png)"),
+            "![대체텍스트](image.png)"
+        );
+        assert_eq!(
+            escape_accidental_markdown_links("\\[별표 3](일반직등)"),
+            "\\[별표 3](일반직등)"
+        );
     }
 
     fn git_ok<const N: usize>(repo: &Path, args: [&str; N]) {

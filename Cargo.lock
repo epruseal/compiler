@@ -410,6 +410,7 @@ dependencies = [
  "anyhow",
  "clap",
  "crc32fast",
+ "git-writer",
  "libdeflater",
  "mimalloc",
  "quick-xml",

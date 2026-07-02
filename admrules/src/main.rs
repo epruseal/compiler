@@ -7,7 +7,8 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context, Result};
 use clap::Parser;
 use git_writer::{
-    BareRepoWriter, GitTimestampKst, PreparedBlob, RepoPathBuf, hex, precompute_blob,
+    BareRepoWriter, GitTimestampKst, PreparedBlob, RepoPathBuf, escape_accidental_markdown_links,
+    hex, precompute_blob,
 };
 use quick_xml::Reader;
 use quick_xml::events::Event;
@@ -1173,7 +1174,7 @@ fn render_markdown(rule: &Admrule) -> String {
     let body = if rule.body.trim().is_empty() {
         "본문은 국가법령정보센터 원문 또는 첨부파일을 참조하세요.".to_string()
     } else {
-        rule.body.trim().to_string()
+        escape_accidental_markdown_links(rule.body.trim())
     };
     let original_ministry = if rule.original_ministry.is_empty() {
         String::new()
@@ -1248,6 +1249,14 @@ mod tests {
         assert_eq!(rule.name, "테스트 고시");
         assert!(render_markdown(&rule).contains("발령일자: 2024-05-04"));
         assert!(render_markdown(&rule).contains("첨부파일: []"));
+    }
+
+    #[test]
+    fn render_markdown_escapes_accidental_markdown_links() {
+        let xml = "<AdmRulService><행정규칙일련번호>123</행정규칙일련번호><행정규칙명>테스트 고시</행정규칙명><행정규칙종류>고시</행정규칙종류><소관부처명>행정안전부</소관부처명><발령일자>20240504</발령일자><조문내용>제1조 [별표 3](경력환산율표)을 적용한다.</조문내용></AdmRulService>";
+        let rule = parse_admrule(xml.as_bytes(), "123").unwrap();
+        let markdown = render_markdown(&rule);
+        assert!(markdown.contains("\\[별표 3](경력환산율표)"));
     }
 
     #[test]
