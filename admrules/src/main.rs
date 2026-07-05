@@ -3,8 +3,9 @@
 use std::collections::BTreeMap;
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::sync::OnceLock;
 
-use anyhow::{Context, Result};
+use anyhow::{Context, Result, ensure};
 use clap::Parser;
 use git_writer::{
     BareRepoWriter, GitTimestampKst, PreparedBlob, RepoPathBuf, escape_accidental_markdown_links,
@@ -12,11 +13,13 @@ use git_writer::{
 };
 use quick_xml::Reader;
 use quick_xml::events::Event;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use time::{Date, Month, PrimitiveDateTime, Time as CivilTime, UtcOffset};
 use unicode_normalization::UnicodeNormalization;
 
 const REPOSITORY_README: &[u8] = include_bytes!("../assets/README.md");
+const ORGANIZATION_AUTHORITY_YAML: &str = include_str!("../assets/organization_authority.yaml");
+static ORGANIZATION_AUTHORITY: OnceLock<OrganizationAuthority> = OnceLock::new();
 
 /// Command-line interface.
 #[derive(Debug, Parser)]
@@ -69,6 +72,31 @@ struct ValidationReport {
     entries_total: usize,
 }
 
+#[derive(Debug, Deserialize)]
+struct OrganizationAuthority {
+    missing_tokens: Vec<String>,
+    aliases: BTreeMap<String, String>,
+    historical_root_successors: BTreeMap<String, Vec<String>>,
+    department_root_overrides: Vec<DepartmentRootOverride>,
+    stale_department_roots: Vec<StaleDepartmentRoot>,
+    parents: BTreeMap<String, String>,
+    roots: Vec<String>,
+    rule_type_roots: BTreeMap<String, String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct DepartmentRootOverride {
+    top: String,
+    department_agency: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct StaleDepartmentRoot {
+    top: String,
+    agency: String,
+    department_agency: String,
+}
+
 /// Parsed administrative-rule metadata and body.
 #[derive(Debug, Clone)]
 struct Admrule {
@@ -106,6 +134,20 @@ struct Admrule {
     attachments: Vec<Attachment>,
     /// Body text.
     body: String,
+}
+
+impl Admrule {
+    fn identity(&self) -> &str {
+        if self.rule_id.trim().is_empty() {
+            &self.serial
+        } else {
+            &self.rule_id
+        }
+    }
+
+    fn is_repeal(&self) -> bool {
+        self.amendment.contains("폐지")
+    }
 }
 
 /// Parsed 별표 attachment link.
@@ -178,6 +220,16 @@ fn compile_bare_repo_with_manifest(
         INITIAL_COMMIT_EPOCH,
     )?;
     for entry in &entries {
+        if entry.delete_only {
+            if let Some(previous_path) = &entry.previous_path {
+                repo.commit_bot_deletions(
+                    &[RepoPathBuf::file(previous_path)],
+                    &entry.message,
+                    GitTimestampKst::from_epoch(entry.timestamp),
+                )?;
+            }
+            continue;
+        }
         let (blob_sha, compressed_blob) = precompute_blob(&entry.content);
         if let Some(previous_path) = &entry.previous_path {
             repo.commit_bot_file_with_deletions(
@@ -209,7 +261,7 @@ fn compile_bare_repo_with_manifest(
             },
         )?;
     }
-    eprintln!("committed {} admrule markdown files", entries.len());
+    eprintln!("committed {} admrule revisions", entries.len());
     Ok(())
 }
 
@@ -250,6 +302,7 @@ struct ImportEntry {
     path: String,
     previous_path: Option<String>,
     identity: String,
+    delete_only: bool,
     content: Vec<u8>,
     message: String,
     timestamp: i64,
@@ -302,7 +355,8 @@ fn render_admrule_entries(cache_dir: &Path, limit: Option<usize>) -> Result<Vec<
         entries.push(ImportEntry {
             path: rel.to_string_lossy().replace('\\', "/"),
             previous_path: None,
-            identity: rule.serial.clone(),
+            identity: rule.identity().to_string(),
+            delete_only: rule.is_repeal(),
             content: render_markdown(&rule).into_bytes(),
             message: admrule_commit_message(&rule),
             timestamp: commit_timestamp(&rule.issue_date_raw)?,
@@ -323,10 +377,15 @@ fn render_admrule_entries(cache_dir: &Path, limit: Option<usize>) -> Result<Vec<
 fn assign_previous_paths(entries: &mut [ImportEntry]) {
     let mut latest_paths = BTreeMap::new();
     for entry in entries {
-        if let Some(previous_path) = latest_paths.insert(entry.identity.clone(), entry.path.clone())
-            && previous_path != entry.path
-        {
-            entry.previous_path = Some(previous_path);
+        if entry.delete_only {
+            entry.previous_path = latest_paths.remove(&entry.identity);
+        } else {
+            if let Some(previous_path) =
+                latest_paths.insert(entry.identity.clone(), entry.path.clone())
+                && previous_path != entry.path
+            {
+                entry.previous_path = Some(previous_path);
+            }
         }
     }
 }
@@ -396,6 +455,16 @@ fn compile_dir(cache_dir: &Path, output: &Path, limit: Option<usize>) -> Result<
     fs::write(output.join("README.md"), REPOSITORY_README)?;
     let entries = render_admrule_entries(cache_dir, limit)?;
     for entry in &entries {
+        if entry.delete_only {
+            if let Some(previous_path) = &entry.previous_path {
+                let previous = output.join(previous_path);
+                if previous.exists() {
+                    fs::remove_file(&previous)
+                        .with_context(|| format!("failed to remove {}", previous.display()))?;
+                }
+            }
+            continue;
+        }
         if let Some(previous_path) = &entry.previous_path {
             let previous = output.join(previous_path);
             if previous.exists() {
@@ -430,27 +499,38 @@ fn read_xml_files(cache_dir: &Path) -> Result<Vec<PathBuf>> {
 
 /// Parse a cached XML document with a flat tag text map.
 fn parse_admrule(raw: &[u8], fallback_serial: &str) -> Result<Admrule> {
+    ensure_admrule_detail_xml(raw)?;
     let fields = tag_texts(raw)?;
     let attachments = collect_attachments(raw)?;
     let serial = first(&fields, &["행정규칙일련번호", "ID"])
         .unwrap_or(fallback_serial)
         .to_string();
+    let rule_type = nfc(first(&fields, &["행정규칙종류", "행정규칙종류명"]).unwrap_or(""));
     let body = collect_body(&fields, &["조문내용", "본문", "내용"]);
     let raw_ministry = nfc(first(&fields, &["소관부처명"]).unwrap_or(""));
     let raw_parent = nfc(first(&fields, &["상위부처명"]).unwrap_or(""));
     let raw_department_org = nfc(first(&fields, &["담당부서기관명"]).unwrap_or(""));
     let (raw_top_ministry, resolved_ministry) =
-        resolve_ministry_names(&raw_ministry, &raw_parent, &raw_department_org);
+        resolve_ministry_names(&raw_ministry, &raw_parent, &raw_department_org, &rule_type);
     let org_path = resolve_org_path(&raw_top_ministry, &resolved_ministry);
-    let top_ministry = org_path
+    let mut top_ministry = org_path
         .first()
         .cloned()
         .unwrap_or_else(|| raw_top_ministry.clone());
-    let ministry = org_path
+    let mut ministry = org_path
         .last()
         .cloned()
         .unwrap_or_else(|| resolved_ministry.clone());
-    let original_ministry = if raw_ministry.is_empty() || raw_ministry == ministry {
+    let mut org_path = org_path;
+    if top_ministry.is_empty() && ministry.is_empty() {
+        top_ministry = "_미분류".to_string();
+        ministry = "_미분류".to_string();
+        org_path = vec!["_미분류".to_string()];
+    }
+    let original_ministry = if raw_ministry.is_empty()
+        || is_missing_org_token(raw_ministry.trim())
+        || raw_ministry == ministry
+    {
         String::new()
     } else {
         raw_ministry
@@ -459,7 +539,7 @@ fn parse_admrule(raw: &[u8], fallback_serial: &str) -> Result<Admrule> {
         serial,
         rule_id: first(&fields, &["행정규칙ID"]).unwrap_or("").to_string(),
         name: nfc(first(&fields, &["행정규칙명", "행정규칙명_한글"]).unwrap_or("")),
-        rule_type: nfc(first(&fields, &["행정규칙종류", "행정규칙종류명"]).unwrap_or("")),
+        rule_type,
         top_ministry,
         ministry,
         org_path,
@@ -480,6 +560,16 @@ fn parse_admrule(raw: &[u8], fallback_serial: &str) -> Result<Admrule> {
         attachments,
         body,
     })
+}
+
+fn ensure_admrule_detail_xml(raw: &[u8]) -> Result<()> {
+    let root = parse_xml_tree(raw)?;
+    ensure!(
+        root.name == "AdmRulService",
+        "unexpected admrule detail root tag: {}",
+        root.name
+    );
+    Ok(())
 }
 
 /// Extract all text values by tag name.
@@ -672,10 +762,25 @@ fn nfc(value: &str) -> String {
     value.nfc().collect::<String>()
 }
 
-/// Normalize observed ministry-name drift before paths/frontmatter are emitted.
-fn normalize_ministry_name(value: &str, fallback: &str) -> String {
+fn organization_authority() -> &'static OrganizationAuthority {
+    ORGANIZATION_AUTHORITY.get_or_init(|| {
+        serde_yaml::from_str(ORGANIZATION_AUTHORITY_YAML)
+            .expect("failed to parse admrule organization authority")
+    })
+}
+
+fn is_missing_org_token(value: &str) -> bool {
+    let trimmed = value.trim();
+    trimmed.is_empty()
+        || organization_authority()
+            .missing_tokens
+            .iter()
+            .any(|token| token.eq_ignore_ascii_case(trimmed))
+}
+
+fn normalize_ministry_text(value: &str, fallback: &str) -> String {
     let mut text = nfc(value).trim().to_string();
-    if is_iso_date(&text) {
+    if is_iso_date(&text) || is_missing_org_token(&text) {
         text = nfc(fallback).trim().to_string();
     }
     let text = text
@@ -683,47 +788,53 @@ fn normalize_ministry_name(value: &str, fallback: &str) -> String {
         .split_whitespace()
         .collect::<Vec<_>>()
         .join(" ");
-    canonical_ministry_name(&text).unwrap_or(&text).to_string()
-}
-
-fn canonical_ministry_name(value: &str) -> Option<&'static str> {
-    match value {
-        "문화재청" | "문화재청(구)" => Some("국가유산청"),
-        "통계청" => Some("국가데이터처"),
-        "특허청" => Some("지식재산처"),
-        "환경부" | "환경부(구)" => Some("기후에너지환경부"),
-        "국립환경인력개발원" => Some("국립환경인재개발원"),
-        "산업통상자원부" => Some("산업통상부"),
-        "기획재정부" => Some("재정경제부"),
-        "행정자치부" => Some("행정안전부"),
-        "미래창조과학부" => Some("과학기술정보통신부"),
-        "중소기업청" => Some("중소벤처기업부"),
-        "국가보훈처" => Some("국가보훈부"),
-        "방송통신위원회" => Some("방송미디어통신위원회"),
-        "방송통신사무소" => Some("방송미디어통신사무소"),
-        "여성가족부" => Some("성평등가족부"),
-        "식품의약품안전청" => Some("식품의약품안전처"),
-        "평생교육진흥원" => Some("국가평생교육진흥원"),
-        "중앙민방위방재교육원" | "국가민방위재난안전교육원" => {
-            Some("국가재난안전교육원")
-        }
-        _ => None,
+    if is_iso_date(&text) || is_missing_org_token(&text) {
+        String::new()
+    } else {
+        text
     }
 }
 
-fn resolve_ministry_names(ministry: &str, parent: &str, department_org: &str) -> (String, String) {
+/// Normalize observed ministry-name drift before paths/frontmatter are emitted.
+fn normalize_ministry_name(value: &str, fallback: &str) -> String {
+    let text = normalize_ministry_text(value, fallback);
+    if text.is_empty() {
+        return text;
+    }
+    organization_authority()
+        .aliases
+        .get(&text)
+        .unwrap_or(&text)
+        .to_string()
+}
+
+fn resolve_ministry_names(
+    ministry: &str,
+    parent: &str,
+    department_org: &str,
+    rule_type: &str,
+) -> (String, String) {
+    let original_agency = normalize_ministry_text(ministry, parent);
     let mut agency = normalize_ministry_name(ministry, parent);
     let normalized_parent = normalize_ministry_name(parent, "");
     let (department_agency, department_unit) = split_department_org_name(department_org);
-    let mut top = if parent.trim().is_empty() {
+    let root_from_rule_type = organization_authority()
+        .rule_type_roots
+        .get(&normalize_ministry_name(rule_type, ""))
+        .or_else(|| organization_authority().rule_type_roots.get(rule_type))
+        .cloned();
+    let mut top = if normalized_parent.is_empty() {
         agency.clone()
     } else {
         normalized_parent.clone()
     };
 
-    if should_use_current_department_root_for_stale_ministry(&top, &agency, &department_agency)
-        || should_collapse_historical_root_ministry(&top, &agency)
-    {
+    if should_use_current_department_root_for_stale_ministry(&top, &agency, &department_agency) {
+        agency.clone_from(&top);
+    } else if agency == top && should_use_department_root(&top, &department_agency) {
+        top = department_agency.clone();
+        agency = department_agency;
+    } else if should_collapse_historical_root_ministry(&top, &original_agency) {
         agency.clone_from(&top);
     } else if let Some((chain_top, chain_agency)) =
         split_parent_agency_chain(&normalized_parent, &department_agency)
@@ -736,16 +847,21 @@ fn resolve_ministry_names(ministry: &str, parent: &str, department_org: &str) ->
         top.clone_from(&agency);
     } else if agency == department_unit && !department_agency.is_empty() {
         agency = department_agency.clone();
-    } else if agency == top && should_use_department_root(&top, &department_agency) {
-        top = department_agency.clone();
-        agency = department_agency;
     }
 
     if top.is_empty() {
-        top.clone_from(&agency);
+        top = if agency.is_empty() {
+            root_from_rule_type.clone().unwrap_or_default()
+        } else {
+            agency.clone()
+        };
     }
     if agency.is_empty() {
-        agency.clone_from(&top);
+        agency = if top.is_empty() {
+            root_from_rule_type.unwrap_or_default()
+        } else {
+            top.clone()
+        };
     }
     (top, agency)
 }
@@ -755,34 +871,19 @@ fn should_use_current_department_root_for_stale_ministry(
     agency: &str,
     department_agency: &str,
 ) -> bool {
-    matches!(
-        (top, agency, department_agency),
-        (
-            "과학기술정보통신부",
-            "방송미디어통신위원회",
-            "과학기술정보통신부"
-        ) | ("기후에너지환경부", "국토교통부", "기후에너지환경부")
-    )
+    organization_authority()
+        .stale_department_roots
+        .iter()
+        .any(|item| {
+            item.top == top && item.agency == agency && item.department_agency == department_agency
+        })
 }
 
 fn should_collapse_historical_root_ministry(top: &str, agency: &str) -> bool {
-    match agency {
-        "문교부" | "교육인적자원부" => top == "교육부",
-        "교육과학기술부" => matches!(top, "교육부" | "과학기술정보통신부"),
-        "노동부" => top == "고용노동부",
-        "외교통상부" => top == "외교부",
-        "국토해양부" => matches!(top, "국토교통부" | "해양수산부" | "기후에너지환경부"),
-        "지식경제부" => top == "산업통상부",
-        "정보통신부" => top == "과학기술정보통신부",
-        "문화관광부" => top == "문화체육관광부",
-        "안전행정부" => top == "행정안전부",
-        "보건복지가족부" => top == "보건복지부",
-        "농림부" => top == "농림축산식품부",
-        "농림수산부" | "농림수산식품부" => {
-            matches!(top, "농림축산식품부" | "해양수산부")
-        }
-        _ => false,
-    }
+    organization_authority()
+        .historical_root_successors
+        .get(agency)
+        .is_some_and(|successors| successors.iter().any(|successor| successor == top))
 }
 
 fn should_use_department_root(top: &str, department_agency: &str) -> bool {
@@ -790,7 +891,10 @@ fn should_use_department_root(top: &str, department_agency: &str) -> bool {
         return false;
     }
     !is_root_level_agency(top)
-        || matches!((top, department_agency), ("산업통상부", "기후에너지환경부"))
+        || organization_authority()
+            .department_root_overrides
+            .iter()
+            .any(|item| item.top == top && item.department_agency == department_agency)
 }
 
 fn resolve_org_path(top: &str, agency: &str) -> Vec<String> {
@@ -831,46 +935,11 @@ fn build_legal_org_path(agency: &str) -> Vec<String> {
     }
 }
 
-fn legal_parent_agency(value: &str) -> Option<&'static str> {
-    match value {
-        "국가정보원" => Some("대통령"),
-        "국무조정실"
-        | "국무총리비서실"
-        | "기획예산처"
-        | "인사혁신처"
-        | "법제처"
-        | "식품의약품안전처"
-        | "국가데이터처"
-        | "지식재산처"
-        | "공정거래위원회"
-        | "국민권익위원회"
-        | "금융위원회"
-        | "개인정보보호위원회"
-        | "원자력안전위원회" => Some("국무총리"),
-        "국세청" | "관세청" | "조달청" => Some("재정경제부"),
-        "재외동포청" => Some("외교부"),
-        "병무청" | "방위사업청" => Some("국방부"),
-        "경찰청" | "소방청" => Some("행정안전부"),
-        "국가유산청" => Some("문화체육관광부"),
-        "농촌진흥청" | "산림청" => Some("농림축산식품부"),
-        "질병관리청" => Some("보건복지부"),
-        "기상청" => Some("기후에너지환경부"),
-        "해양경찰청" => Some("해양수산부"),
-        "방송미디어통신위원회" | "국가교육위원회" => Some("대통령"),
-        "방송미디어통신사무소" => Some("방송미디어통신위원회"),
-        "국립전파연구원" | "중앙전파관리소" => Some("과학기술정보통신부"),
-        "전파시험인증센터" => Some("국립전파연구원"),
-        "위성전파감시센터" | "전파관리소" => Some("중앙전파관리소"),
-        "우주항공청" => Some("과학기술정보통신부"),
-        "행정중심복합도시건설청" | "새만금개발청" => Some("국토교통부"),
-        "대검찰청" => Some("법무부"),
-        "국립농산물품질관리원" => Some("농림축산식품부"),
-        "민주평화통일자문회의사무처" => Some("대통령"),
-        "수도권매립지관리공사" => Some("기후에너지환경부"),
-        "국가평생교육진흥원" => Some("교육부"),
-        "국가재난안전교육원" | "국립재난안전연구원" => Some("행정안전부"),
-        _ => None,
-    }
+fn legal_parent_agency(value: &str) -> Option<&str> {
+    organization_authority()
+        .parents
+        .get(value)
+        .map(String::as_str)
 }
 
 fn split_department_org_name(value: &str) -> (String, String) {
@@ -901,37 +970,10 @@ fn split_parent_agency_chain(parent: &str, agency: &str) -> Option<(String, Stri
 
 fn is_root_level_agency(value: &str) -> bool {
     legal_parent_agency(value).is_some()
-        || matches!(
-            value,
-            "대통령"
-                | "국무총리"
-                | "교육부"
-                | "외교부"
-                | "통일부"
-                | "법무부"
-                | "국방부"
-                | "행정안전부"
-                | "문화체육관광부"
-                | "농림축산식품부"
-                | "산업통상부"
-                | "보건복지부"
-                | "기후에너지환경부"
-                | "고용노동부"
-                | "성평등가족부"
-                | "국토교통부"
-                | "해양수산부"
-                | "중소벤처기업부"
-                | "재정경제부"
-                | "과학기술정보통신부"
-                | "국가보훈부"
-                | "국가인권위원회"
-                | "중앙선거관리위원회"
-                | "고위공직자범죄수사처"
-                | "진실화해를위한과거사정리위원회"
-                | "세월호 선체조사위원회"
-                | "친일반민족행위자재산조사위원회"
-                | "10·29이태원참사진상규명과재발방지를위한특별조사위원회"
-        )
+        || organization_authority()
+            .roots
+            .iter()
+            .any(|root| root == value)
 }
 
 fn is_iso_date(value: &str) -> bool {
@@ -1052,8 +1094,9 @@ fn admrule_path(rule: &Admrule, registry: &mut PathRegistry) -> PathBuf {
     let rule_type = safe_path_part(&rule.rule_type);
     let name = safe_path_part_with_truncation_suffix(&rule.name, &rule.serial);
     let prefix = org_parts.join("/");
+    let identity = rule.identity();
     let base = format!("{prefix}/{rule_type}/{name}/본문.md");
-    if claim_path(registry, &base, &rule.serial) {
+    if claim_path(registry, &base, identity) {
         return PathBuf::from(base);
     }
     let first_suffix = if rule.issue_no.is_empty() {
@@ -1068,14 +1111,14 @@ fn admrule_path(rule: &Admrule, registry: &mut PathRegistry) -> PathBuf {
     ];
     for suffix in candidates {
         let suffixed = format!("{prefix}/{rule_type}/{name}_{suffix}/본문.md");
-        if claim_path(registry, &suffixed, &rule.serial) {
+        if claim_path(registry, &suffixed, identity) {
             return PathBuf::from(suffixed);
         }
     }
     let mut idx = 2usize;
     loop {
         let suffixed = format!("{prefix}/{rule_type}/{name}_{}_{idx}/본문.md", rule.serial);
-        if claim_path(registry, &suffixed, &rule.serial) {
+        if claim_path(registry, &suffixed, identity) {
             return PathBuf::from(suffixed);
         }
         idx += 1;
@@ -1287,6 +1330,33 @@ mod tests {
     }
 
     #[test]
+    fn path_registry_reuses_path_for_same_rule_id_revisions() {
+        let first = parse_admrule(
+            "<AdmRulService><행정규칙일련번호>100</행정규칙일련번호><행정규칙ID>ABC</행정규칙ID><행정규칙명>같은 이름</행정규칙명><행정규칙종류>고시</행정규칙종류><소관부처명>행정안전부</소관부처명><발령번호>제1호</발령번호></AdmRulService>".as_bytes(),
+            "100",
+        )
+        .unwrap();
+        let second = parse_admrule(
+            "<AdmRulService><행정규칙일련번호>200</행정규칙일련번호><행정규칙ID>ABC</행정규칙ID><행정규칙명>같은 이름</행정규칙명><행정규칙종류>고시</행정규칙종류><소관부처명>행정안전부</소관부처명><발령번호>제2호</발령번호></AdmRulService>".as_bytes(),
+            "200",
+        )
+        .unwrap();
+        let other = parse_admrule(
+            "<AdmRulService><행정규칙일련번호>300</행정규칙일련번호><행정규칙ID>XYZ</행정규칙ID><행정규칙명>같은 이름</행정규칙명><행정규칙종류>고시</행정규칙종류><소관부처명>행정안전부</소관부처명><발령번호>제3호</발령번호></AdmRulService>".as_bytes(),
+            "300",
+        )
+        .unwrap();
+        let mut registry = PathRegistry::new();
+        let base = PathBuf::from("행정안전부/_본부/고시/같은 이름/본문.md");
+        assert_eq!(admrule_path(&first, &mut registry), base);
+        assert_eq!(admrule_path(&second, &mut registry), base);
+        assert_eq!(
+            admrule_path(&other, &mut registry),
+            PathBuf::from("행정안전부/_본부/고시/같은 이름_제3호/본문.md")
+        );
+    }
+
+    #[test]
     fn safe_path_part_uses_windows_safe_components() {
         assert_eq!(safe_path_part("테스트 고시."), "테스트 고시");
         assert_eq!(safe_path_part("NUL.txt"), "_NUL.txt");
@@ -1319,6 +1389,19 @@ mod tests {
         assert_ne!(first_path, second_path);
         assert!(first_path.to_string_lossy().contains("_1/본문.md"));
         assert!(second_path.to_string_lossy().contains("_2/본문.md"));
+    }
+
+    #[test]
+    fn rejects_html_error_page() {
+        let err = parse_admrule(
+            br#"<html><head><title>Error</title></head><body></body></html>"#,
+            "123",
+        )
+        .unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("unexpected admrule detail root tag")
+        );
     }
 
     #[test]
@@ -1403,6 +1486,8 @@ mod tests {
             normalize_ministry_name("국립환경인력개발원", ""),
             "국립환경인재개발원"
         );
+        assert_eq!(normalize_ministry_name("null", ""), "");
+        assert_eq!(normalize_ministry_name("null", "행정안전부"), "행정안전부");
         assert_eq!(normalize_ministry_name("행정자치부", ""), "행정안전부");
         assert_eq!(normalize_ministry_name("기획재정부", ""), "재정경제부");
         assert_eq!(
@@ -1709,6 +1794,74 @@ mod tests {
     }
 
     #[test]
+    fn infers_root_for_presidential_and_prime_minister_orders() {
+        let presidential_xml = "<AdmRulService><행정규칙일련번호>123</행정규칙일련번호><행정규칙명>대통령 훈령</행정규칙명><행정규칙종류>대통령훈령</행정규칙종류><소관부처명>null</소관부처명><상위부처명>null</상위부처명><발령일자>20260101</발령일자><조문내용>제1조 목적</조문내용></AdmRulService>";
+        let presidential_rule = parse_admrule(presidential_xml.as_bytes(), "123").unwrap();
+        assert_eq!(presidential_rule.org_path, ["대통령"]);
+        assert_eq!(presidential_rule.top_ministry, "대통령");
+        assert_eq!(presidential_rule.ministry, "대통령");
+        assert!(presidential_rule.original_ministry.is_empty());
+        assert_eq!(
+            admrule_path(&presidential_rule, &mut PathRegistry::new()),
+            PathBuf::from("대통령/_본부/대통령훈령/대통령 훈령/본문.md")
+        );
+
+        let prime_minister_xml = "<AdmRulService><행정규칙일련번호>124</행정규칙일련번호><행정규칙명>국무총리 훈령</행정규칙명><행정규칙종류>국무총리훈령</행정규칙종류><소관부처명></소관부처명><상위부처명>null</상위부처명><발령일자>20260101</발령일자><조문내용>제1조 목적</조문내용></AdmRulService>";
+        let prime_minister_rule = parse_admrule(prime_minister_xml.as_bytes(), "124").unwrap();
+        assert_eq!(prime_minister_rule.org_path, ["국무총리"]);
+        assert_eq!(prime_minister_rule.top_ministry, "국무총리");
+        assert_eq!(prime_minister_rule.ministry, "국무총리");
+        assert_eq!(
+            admrule_path(&prime_minister_rule, &mut PathRegistry::new()),
+            PathBuf::from("국무총리/_본부/국무총리훈령/국무총리 훈령/본문.md")
+        );
+    }
+
+    #[test]
+    fn uses_parent_map_when_parent_is_literal_null() {
+        let xml = "<AdmRulService><행정규칙일련번호>123</행정규칙일련번호><행정규칙명>국립환경과학원 예규</행정규칙명><행정규칙종류>예규</행정규칙종류><소관부처명>국립환경과학원</소관부처명><상위부처명>null</상위부처명><담당부서기관명>국립환경과학원</담당부서기관명><발령일자>20260101</발령일자><조문내용>제1조 목적</조문내용></AdmRulService>";
+        let rule = parse_admrule(xml.as_bytes(), "123").unwrap();
+        assert_eq!(rule.top_ministry, "기후에너지환경부");
+        assert_eq!(rule.ministry, "국립환경과학원");
+        assert_eq!(rule.org_path, ["기후에너지환경부", "국립환경과학원"]);
+        assert_eq!(
+            admrule_path(&rule, &mut PathRegistry::new()),
+            PathBuf::from("기후에너지환경부/국립환경과학원/예규/국립환경과학원 예규/본문.md")
+        );
+    }
+
+    #[test]
+    fn maps_remaining_null_roots_to_current_parent() {
+        let payment_xml = "<AdmRulService><행정규칙일련번호>2000000053188</행정규칙일련번호><행정규칙ID>2033242</행정규칙ID><행정규칙명>결제완결성 보장 대상 지급결제제도 지정에 관한 규정</행정규칙명><행정규칙종류>고시</행정규칙종류><소관부처명>결제정책팀</소관부처명><상위부처명>null</상위부처명><담당부서기관명>결제정책팀</담당부서기관명><발령일자>20080530</발령일자><조문내용>제1조 목적</조문내용></AdmRulService>";
+        let payment_rule = parse_admrule(payment_xml.as_bytes(), "2000000053188").unwrap();
+        assert_eq!(payment_rule.org_path, ["국무총리", "금융위원회"]);
+        assert_eq!(
+            admrule_path(&payment_rule, &mut PathRegistry::new()),
+            PathBuf::from(
+                "국무총리/금융위원회/고시/결제완결성 보장 대상 지급결제제도 지정에 관한 규정/본문.md"
+            )
+        );
+
+        let abductee_xml = "<AdmRulService><행정규칙일련번호>2000000060338</행정규칙일련번호><행정규칙ID>2039421</행정규칙ID><행정규칙명>납북피해위로금등의지급절차</행정규칙명><행정규칙종류>공고</행정규칙종류><소관부처명>납북피해자보상및지원심의위원회</소관부처명><상위부처명>null</상위부처명><담당부서기관명>납북피해자보상및지원심의위원회</담당부서기관명><발령일자>20081010</발령일자><조문내용>제1조 목적</조문내용></AdmRulService>";
+        let abductee_rule = parse_admrule(abductee_xml.as_bytes(), "2000000060338").unwrap();
+        assert_eq!(
+            abductee_rule.org_path,
+            ["통일부", "납북피해자보상및지원심의위원회"]
+        );
+
+        let samcheong_xml = "<AdmRulService><행정규칙일련번호>2000000060373</행정규칙일련번호><행정규칙ID>2039427</행정규칙ID><행정규칙명>삼청교육피해자보상또는명예회복에대한결정</행정규칙명><행정규칙종류>공고</행정규칙종류><소관부처명>삼청교육피해자명예회복및보상심의위원회</소관부처명><상위부처명>null</상위부처명><담당부서기관명>삼청교육피해자명예회복및보상심의위원회</담당부서기관명><발령일자>20080305</발령일자><조문내용>제1조 목적</조문내용></AdmRulService>";
+        let samcheong_rule = parse_admrule(samcheong_xml.as_bytes(), "2000000060373").unwrap();
+        assert_eq!(
+            samcheong_rule.org_path,
+            ["국무총리", "삼청교육피해자명예회복및보상심의위원회"]
+        );
+
+        let balanced_xml = "<AdmRulService><행정규칙일련번호>2100000189657</행정규칙일련번호><행정규칙ID>67125</행정규칙ID><행정규칙명>국가균형발전위원회 운영세칙</행정규칙명><행정규칙종류>훈령</행정규칙종류><소관부처명>국가균형발전위원회</소관부처명><상위부처명>국가균형발전위원회</상위부처명><담당부서기관명>국가균형발전위원회(운영지원과)</담당부서기관명><발령일자>20200527</발령일자><조문내용>제1조 목적</조문내용></AdmRulService>";
+        let balanced_rule = parse_admrule(balanced_xml.as_bytes(), "2100000189657").unwrap();
+        assert_eq!(balanced_rule.org_path, ["대통령", "지방시대위원회"]);
+    }
+
+    #[test]
     fn quotes_yaml_sensitive_values() {
         let xml = "<AdmRulService><행정규칙일련번호>123</행정규칙일련번호><행정규칙명>기록관 표준운영절차: 일반</행정규칙명><행정규칙종류>고시</행정규칙종류><소관부처명>행정안전부</소관부처명><발령일자>20240504</발령일자><조문내용>제1조 목적</조문내용></AdmRulService>";
         let rule = parse_admrule(xml.as_bytes(), "123").unwrap();
@@ -1774,6 +1927,48 @@ mod tests {
         let files = git_stdout(&repo, ["ls-tree", "-r", "--name-only", "HEAD"]);
         assert!(files.contains("행정안전부/_본부/고시/새 고시/본문.md"));
         assert!(!files.contains("행정안전부/_본부/고시/이전 고시/본문.md"));
+    }
+
+    #[test]
+    fn bare_repo_deletes_rule_on_repeal_revision() {
+        let temp = tempfile::tempdir().unwrap();
+        let cache = temp.path().join("cache");
+        fs::create_dir(&cache).unwrap();
+        fs::write(
+            cache.join("100.xml"),
+            "<AdmRulService><행정규칙일련번호>100</행정규칙일련번호><행정규칙ID>ABC</행정규칙ID><행정규칙명>폐지 대상 고시</행정규칙명><행정규칙종류>고시</행정규칙종류><소관부처명>행정안전부</소관부처명><발령번호>1</발령번호><발령일자>20240101</발령일자><조문내용>이전 본문</조문내용></AdmRulService>",
+        )
+        .unwrap();
+        fs::write(
+            cache.join("200.xml"),
+            "<AdmRulService><행정규칙일련번호>200</행정규칙일련번호><행정규칙ID>ABC</행정규칙ID><행정규칙명>폐지 대상 고시</행정규칙명><행정규칙종류>고시</행정규칙종류><소관부처명>행정안전부</소관부처명><발령번호>2</발령번호><발령일자>20240201</발령일자><제개정구분명>폐지</제개정구분명><조문내용>폐지</조문내용></AdmRulService>",
+        )
+        .unwrap();
+        let repo = temp.path().join("out.git");
+
+        compile_bare_repo(&cache, &repo, None).unwrap();
+
+        git_ok(&repo, ["fsck", "--full"]);
+        assert_eq!(git_stdout(&repo, ["rev-list", "--count", "--all"]), "3");
+        let files = git_stdout(&repo, ["ls-tree", "-r", "--name-only", "HEAD"]);
+        assert!(!files.contains("행정안전부/_본부/고시/폐지 대상 고시/본문.md"));
+        let previous_body = git_stdout(
+            &repo,
+            [
+                "show",
+                "HEAD~1:행정안전부/_본부/고시/폐지 대상 고시/본문.md",
+            ],
+        );
+        assert!(previous_body.contains("행정규칙ID: 'ABC'"));
+        assert!(previous_body.contains("행정규칙일련번호: '100'"));
+        assert!(previous_body.contains("이전 본문"));
+        assert!(
+            git_stdout(
+                &repo,
+                ["log", "--format=%B", "--grep=행정규칙일련번호: 200"]
+            )
+            .contains("행정규칙ID: ABC")
+        );
     }
 
     #[test]

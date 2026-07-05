@@ -541,6 +541,28 @@ impl BareRepoWriter {
         )
     }
 
+    /// Commits deletions of generated paths using bot authorship.
+    pub fn commit_bot_deletions(
+        &mut self,
+        stale_paths: &[RepoPathBuf],
+        message: &str,
+        time: GitTimestampKst,
+    ) -> Result<()> {
+        let bot = GitPerson {
+            name: "legalize-kr-bot",
+            email: "bot@legalize.kr",
+        };
+        self.commit_deletions(
+            stale_paths,
+            message,
+            CommitPeople {
+                author: bot,
+                committer: bot,
+            },
+            time,
+        )
+    }
+
     /// Alias for law-like generated entries.
     pub fn commit_law(
         &mut self,
@@ -671,6 +693,28 @@ impl BareRepoWriter {
             blob.compressed,
         )?;
         self.root.insert_file(&components, blob.sha)?;
+        let root_sha = self.root.materialize(&mut self.writer)?;
+        let commit_sha =
+            self.write_commit(root_sha, message, people.author, people.committer, time)?;
+        self.parent_commit = Some(commit_sha);
+        Ok(())
+    }
+
+    /// Commits deletions after updating tree state.
+    fn commit_deletions(
+        &mut self,
+        stale_paths: &[RepoPathBuf],
+        message: &str,
+        people: CommitPeople<'_>,
+        time: GitTimestampKst,
+    ) -> Result<()> {
+        let stale_components = stale_paths
+            .iter()
+            .map(|path| validate_path(path.as_str()))
+            .collect::<Result<Vec<_>>>()?;
+        for components in &stale_components {
+            self.root.remove_file(components)?;
+        }
         let root_sha = self.root.materialize(&mut self.writer)?;
         let commit_sha =
             self.write_commit(root_sha, message, people.author, people.committer, time)?;
@@ -1447,6 +1491,45 @@ mod tests {
         assert!(
             !git_stdout(&output, ["ls-tree", "-r", "--name-only", "HEAD"]).contains("old/path.md")
         );
+    }
+
+    #[test]
+    fn commits_deletion_only_change() {
+        let temp = TempDir::new().unwrap();
+        let output = temp.path().join("output.git");
+        let mut writer = BareRepoWriter::create(&output).unwrap();
+
+        let old = b"old\n";
+        let (sha, compressed) = precompute_blob(old);
+        writer
+            .commit_bot_file(
+                &RepoPathBuf::file("old/path.md"),
+                old,
+                sha,
+                &compressed,
+                "old",
+                GitTimestampKst::from_epoch(1),
+            )
+            .unwrap();
+
+        writer
+            .commit_bot_deletions(
+                &[RepoPathBuf::file("old/path.md")],
+                "delete",
+                GitTimestampKst::from_epoch(2),
+            )
+            .unwrap();
+        writer.finish().unwrap();
+
+        git_ok(&output, ["fsck", "--full"]);
+        assert_eq!(
+            git_stdout(&output, ["rev-list", "--count", "HEAD"]).trim(),
+            "2"
+        );
+        assert!(
+            !git_stdout(&output, ["ls-tree", "-r", "--name-only", "HEAD"]).contains("old/path.md")
+        );
+        assert_eq!(git_stdout(&output, ["show", "HEAD~1:old/path.md"]), "old\n");
     }
 
     #[test]

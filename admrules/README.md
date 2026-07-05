@@ -1,8 +1,8 @@
 # admrule-kr-compiler
 
-[legalize-kr/legalize-pipeline]으로 만들어진 `.cache/admrule` 디렉토리를 git으로
-바꿔주는 컴파일러입니다. 이 프로그램은 국가법령정보센터 API를 직접 호출하지
-않고, 이미 존재하는 캐시만 입력으로 받습니다.
+[legalize-kr/legalize-pipeline]으로 만들어진 `.cache/admrule` 연혁 XML 캐시를
+git history DB로 바꿔주는 컴파일러입니다. 이 프로그램은 국가법령정보센터 API를
+직접 호출하지 않고, 이미 존재하는 캐시만 입력으로 받습니다.
 
 [legalize-kr/legalize-pipeline]: https://github.com/legalize-kr/legalize-pipeline
 
@@ -39,25 +39,29 @@ admrule-kr-compiler ../.cache/admrule --tree -o ./admrule-tree
 
 2-pass로 동작합니다.
 
-1. `{cache_dir}/*.xml`의 행정규칙 메타데이터와 본문을 읽어 entry를 만듭니다.
+1. `{cache_dir}/*.xml`의 행정규칙 메타데이터와 본문을 읽어 revision entry를 만듭니다.
 2. 원천의 `상위부처명`, `소관부처명`, `담당부서기관명`을 정규화해 저장소
    기관 경로를 결정합니다.
 3. 경로 충돌 규칙을 적용해 출력 파일 경로를 확정합니다.
    - 기본 경로: `{기관경로...}/{행정규칙종류}/{행정규칙명}/본문.md`
    - 충돌 시: 행정규칙명에 `발령번호`, `행정규칙일련번호` 또는 두 값을 조합한
      접미사를 붙입니다.
-4. entry를 다음 순서로 정렬합니다.
+4. 같은 행정규칙의 이력 identity는 `행정규칙ID`입니다. 값이 없을 때만
+   `행정규칙일련번호`로 fallback합니다.
+5. entry를 다음 순서로 정렬합니다.
    - `발령일자 asc`
    - `행정규칙일련번호 asc (numeric)`
    - `출력 경로 asc`
-5. 정렬된 순서대로 Markdown과 commit message를 만들고 commit을 작성합니다.
-   같은 `행정규칙일련번호`의 개정으로 경로가 바뀌면 이전 경로의 파일을 함께
-   삭제합니다.
+6. 정렬된 순서대로 Markdown과 commit message를 만들고 commit을 작성합니다.
+   같은 identity의 개정으로 경로가 바뀌면 이전 경로의 파일을 함께 삭제합니다.
+   `제개정구분`에 `폐지`가 포함된 revision은 새 Markdown을 쓰지 않고 해당
+   identity의 최신 경로를 삭제합니다.
 
 ## 출력 특성
 
 - 매 실행마다 fresh bare repo를 새로 만듭니다.
 - branch는 `main`입니다.
+- `HEAD`는 현행 스냅샷입니다. 폐지 전 본문은 Git history에 남습니다.
 - 결과 저장소의 루트 `README.md`는 [`assets/README.md`](assets/README.md)를 사용합니다.
 - commit author/committer는 `legalize-kr-bot <bot@legalize.kr>`입니다.
 - commit timestamp는 발령일자 기준 KST `12:00:00`입니다.
