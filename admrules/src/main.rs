@@ -130,6 +130,8 @@ struct Admrule {
     amendment_code: String,
     /// 현행연혁구분.
     current_history: String,
+    /// 현행여부.
+    current_status: String,
     /// 별표 attachment links.
     attachments: Vec<Attachment>,
     /// Body text.
@@ -249,6 +251,13 @@ fn compile_bare_repo_with_manifest(
                 GitTimestampKst::from_epoch(entry.timestamp),
             )?;
         }
+        if entry.delete_after_write {
+            repo.commit_bot_deletions(
+                &[RepoPathBuf::file(&entry.path)],
+                entry.deletion_message.as_deref().unwrap_or(&entry.message),
+                GitTimestampKst::from_epoch(entry.timestamp),
+            )?;
+        }
     }
     let head_sha = repo.finish()?;
     if let Some(path) = manifest {
@@ -303,8 +312,11 @@ struct ImportEntry {
     previous_path: Option<String>,
     identity: String,
     delete_only: bool,
+    delete_after_write: bool,
     content: Vec<u8>,
     message: String,
+    deletion_message: Option<String>,
+    current_status: String,
     timestamp: i64,
     sort_date: String,
     sort_id: u64,
@@ -357,8 +369,11 @@ fn render_admrule_entries(cache_dir: &Path, limit: Option<usize>) -> Result<Vec<
             previous_path: None,
             identity: rule.identity().to_string(),
             delete_only: rule.is_repeal(),
+            delete_after_write: false,
             content: render_markdown(&rule).into_bytes(),
             message: admrule_commit_message(&rule),
+            deletion_message: Some(non_current_deletion_message(&rule)),
+            current_status: rule.current_status.clone(),
             timestamp: commit_timestamp(&rule.issue_date_raw)?,
             sort_date: compact_date_or_epoch(&rule.issue_date_raw),
             sort_id: rule.serial.parse::<u64>().unwrap_or(u64::MAX),
@@ -370,8 +385,22 @@ fn render_admrule_entries(cache_dir: &Path, limit: Option<usize>) -> Result<Vec<
             .then_with(|| a.sort_id.cmp(&b.sort_id))
             .then_with(|| a.path.cmp(&b.path))
     });
+    mark_final_state_deletions(&mut entries);
     assign_previous_paths(&mut entries);
     Ok(entries)
+}
+
+fn mark_final_state_deletions(entries: &mut [ImportEntry]) {
+    let mut latest_by_identity = BTreeMap::new();
+    for (index, entry) in entries.iter().enumerate() {
+        latest_by_identity.insert(entry.identity.clone(), index);
+    }
+    for index in latest_by_identity.into_values() {
+        let entry = &mut entries[index];
+        if !entry.delete_only && entry.current_status.trim().eq_ignore_ascii_case("N") {
+            entry.delete_after_write = true;
+        }
+    }
 }
 
 fn assign_previous_paths(entries: &mut [ImportEntry]) {
@@ -385,6 +414,9 @@ fn assign_previous_paths(entries: &mut [ImportEntry]) {
                 && previous_path != entry.path
             {
                 entry.previous_path = Some(previous_path);
+            }
+            if entry.delete_after_write {
+                latest_paths.remove(&entry.identity);
             }
         }
     }
@@ -402,6 +434,13 @@ fn admrule_commit_message(rule: &Admrule) -> String {
         rule.issue_no,
         rule.serial,
         rule.rule_id
+    )
+}
+
+fn non_current_deletion_message(rule: &Admrule) -> String {
+    format!(
+        "비현행 제외: {} ({})\n\n행정규칙일련번호: {}\n행정규칙ID: {}\n비현행 제외 행정규칙일련번호: {}",
+        rule.name, rule.issue_no, rule.serial, rule.rule_id, rule.serial
     )
 }
 
@@ -477,6 +516,10 @@ fn compile_dir(cache_dir: &Path, output: &Path, limit: Option<usize>) -> Result<
             fs::create_dir_all(parent)?;
         }
         fs::write(&target, &entry.content)?;
+        if entry.delete_after_write {
+            fs::remove_file(&target)
+                .with_context(|| format!("failed to remove {}", target.display()))?;
+        }
     }
     eprintln!("written {} admrule markdown files", entries.len());
     Ok(())
@@ -557,6 +600,7 @@ fn parse_admrule(raw: &[u8], fallback_serial: &str) -> Result<Admrule> {
             .unwrap_or("")
             .to_string(),
         current_history: first(&fields, &["현행연혁구분"]).unwrap_or("").to_string(),
+        current_status: first(&fields, &["현행여부"]).unwrap_or("").to_string(),
         attachments,
         body,
     })
@@ -1239,7 +1283,7 @@ fn render_markdown(rule: &Admrule) -> String {
     };
     let attachments_yaml = render_attachments_yaml(&rule.attachments);
     format!(
-        "---\n행정규칙ID: {}\n행정규칙일련번호: {}\n행정규칙명: {}\n행정규칙종류: {}\n상위기관명: {}\n소관부처명: {}\n{}{}기관코드: {}\n발령번호: {}\n발령일자: {}\n시행일자: {}\n제개정구분: {}\n제개정구분코드: {}\n현행연혁구분: {}\n본문출처: {}\n출처: {}\n{}발령일자보정: {}\n발령일자원문: {}\n---\n\n{}\n",
+        "---\n행정규칙ID: {}\n행정규칙일련번호: {}\n행정규칙명: {}\n행정규칙종류: {}\n상위기관명: {}\n소관부처명: {}\n{}{}기관코드: {}\n발령번호: {}\n발령일자: {}\n시행일자: {}\n제개정구분: {}\n제개정구분코드: {}\n현행연혁구분: {}\n현행여부: {}\n본문출처: {}\n출처: {}\n{}발령일자보정: {}\n발령일자원문: {}\n---\n\n{}\n",
         yaml_string(&rule.rule_id),
         yaml_string(&rule.serial),
         yaml_string(&rule.name),
@@ -1255,6 +1299,7 @@ fn render_markdown(rule: &Admrule) -> String {
         yaml_string(&rule.amendment),
         yaml_string(&rule.amendment_code),
         yaml_string(&rule.current_history),
+        yaml_string(&rule.current_status),
         yaml_string(body_source),
         yaml_string(&format!(
             "https://www.law.go.kr/행정규칙/{}",
@@ -1968,6 +2013,101 @@ mod tests {
                 ["log", "--format=%B", "--grep=행정규칙일련번호: 200"]
             )
             .contains("행정규칙ID: ABC")
+        );
+    }
+
+    #[test]
+    fn bare_repo_keeps_rule_when_non_current_revision_is_not_latest() {
+        let temp = tempfile::tempdir().unwrap();
+        let cache = temp.path().join("cache");
+        fs::create_dir(&cache).unwrap();
+        fs::write(
+            cache.join("100.xml"),
+            "<AdmRulService><행정규칙일련번호>100</행정규칙일련번호><행정규칙ID>ABC</행정규칙ID><행정규칙명>현행 복귀 고시</행정규칙명><행정규칙종류>고시</행정규칙종류><소관부처명>행정안전부</소관부처명><발령번호>1</발령번호><발령일자>20240101</발령일자><현행여부>N</현행여부><조문내용>중간 본문</조문내용></AdmRulService>",
+        )
+        .unwrap();
+        fs::write(
+            cache.join("200.xml"),
+            "<AdmRulService><행정규칙일련번호>200</행정규칙일련번호><행정규칙ID>ABC</행정규칙ID><행정규칙명>현행 복귀 고시</행정규칙명><행정규칙종류>고시</행정규칙종류><소관부처명>행정안전부</소관부처명><발령번호>2</발령번호><발령일자>20240201</발령일자><현행여부>Y</현행여부><조문내용>최신 본문</조문내용></AdmRulService>",
+        )
+        .unwrap();
+        let repo = temp.path().join("out.git");
+
+        compile_bare_repo(&cache, &repo, None).unwrap();
+
+        git_ok(&repo, ["fsck", "--full"]);
+        assert_eq!(git_stdout(&repo, ["rev-list", "--count", "--all"]), "3");
+        let files = git_stdout(&repo, ["ls-tree", "-r", "--name-only", "HEAD"]);
+        assert!(files.contains("행정안전부/_본부/고시/현행 복귀 고시/본문.md"));
+        let head_body = git_stdout(
+            &repo,
+            ["show", "HEAD:행정안전부/_본부/고시/현행 복귀 고시/본문.md"],
+        );
+        assert!(head_body.contains("현행여부: 'Y'"));
+        assert!(head_body.contains("최신 본문"));
+    }
+
+    #[test]
+    fn bare_repo_deletes_rule_when_latest_revision_is_non_current() {
+        let temp = tempfile::tempdir().unwrap();
+        let cache = temp.path().join("cache");
+        fs::create_dir(&cache).unwrap();
+        fs::write(
+            cache.join("100.xml"),
+            "<AdmRulService><행정규칙일련번호>100</행정규칙일련번호><행정규칙ID>ABC</행정규칙ID><행정규칙명>비현행 전환 고시</행정규칙명><행정규칙종류>고시</행정규칙종류><소관부처명>행정안전부</소관부처명><발령번호>1</발령번호><발령일자>20240101</발령일자><현행여부>Y</현행여부><조문내용>현행 본문</조문내용></AdmRulService>",
+        )
+        .unwrap();
+        fs::write(
+            cache.join("200.xml"),
+            "<AdmRulService><행정규칙일련번호>200</행정규칙일련번호><행정규칙ID>ABC</행정규칙ID><행정규칙명>비현행 전환 고시</행정규칙명><행정규칙종류>고시</행정규칙종류><소관부처명>행정안전부</소관부처명><발령번호>2</발령번호><발령일자>20240201</발령일자><현행여부>N</현행여부><조문내용>비현행 마지막 본문</조문내용></AdmRulService>",
+        )
+        .unwrap();
+        let repo = temp.path().join("out.git");
+
+        compile_bare_repo(&cache, &repo, None).unwrap();
+
+        git_ok(&repo, ["fsck", "--full"]);
+        assert_eq!(git_stdout(&repo, ["rev-list", "--count", "--all"]), "4");
+        let files = git_stdout(&repo, ["ls-tree", "-r", "--name-only", "HEAD"]);
+        assert!(!files.contains("행정안전부/_본부/고시/비현행 전환 고시/본문.md"));
+        let previous_body = git_stdout(
+            &repo,
+            [
+                "show",
+                "HEAD~1:행정안전부/_본부/고시/비현행 전환 고시/본문.md",
+            ],
+        );
+        assert!(previous_body.contains("현행여부: 'N'"));
+        assert!(previous_body.contains("비현행 마지막 본문"));
+        assert!(
+            git_stdout(&repo, ["log", "--format=%B", "--grep=비현행 제외"])
+                .contains("비현행 제외 행정규칙일련번호: 200")
+        );
+    }
+
+    #[test]
+    fn compile_dir_deletes_rule_when_latest_revision_is_non_current() {
+        let temp = tempfile::tempdir().unwrap();
+        let cache = temp.path().join("cache");
+        fs::create_dir(&cache).unwrap();
+        fs::write(
+            cache.join("100.xml"),
+            "<AdmRulService><행정규칙일련번호>100</행정규칙일련번호><행정규칙ID>ABC</행정규칙ID><행정규칙명>비현행 전환 고시</행정규칙명><행정규칙종류>고시</행정규칙종류><소관부처명>행정안전부</소관부처명><발령일자>20240101</발령일자><현행여부>Y</현행여부><조문내용>현행 본문</조문내용></AdmRulService>",
+        )
+        .unwrap();
+        fs::write(
+            cache.join("200.xml"),
+            "<AdmRulService><행정규칙일련번호>200</행정규칙일련번호><행정규칙ID>ABC</행정규칙ID><행정규칙명>비현행 전환 고시</행정규칙명><행정규칙종류>고시</행정규칙종류><소관부처명>행정안전부</소관부처명><발령일자>20240201</발령일자><현행여부>N</현행여부><조문내용>비현행 마지막 본문</조문내용></AdmRulService>",
+        )
+        .unwrap();
+        let output = temp.path().join("out");
+
+        compile_dir(&cache, &output, None).unwrap();
+
+        assert!(
+            !output
+                .join("행정안전부/_본부/고시/비현행 전환 고시/본문.md")
+                .exists()
         );
     }
 
