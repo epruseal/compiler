@@ -1250,6 +1250,233 @@ fn render_attachments_yaml(attachments: &[Attachment]) -> String {
     out
 }
 
+fn append_blank(lines: &mut Vec<String>) {
+    if lines.last().is_some_and(|line| !line.is_empty()) {
+        lines.push(String::new());
+    }
+}
+
+fn render_content_line(line: &str) -> Vec<String> {
+    let trimmed = line.trim_start();
+    if let Some(marker) = paragraph_marker(line) {
+        let text = trimmed[marker.len_utf8()..].trim_start();
+        let rendered = if text.is_empty() {
+            format!("**{marker}**")
+        } else {
+            format!("**{marker}** {text}")
+        };
+        return vec![rendered, String::new()];
+    }
+
+    if let Some((marker, text)) = split_dot_marker(trimmed)
+        && is_numeric_marker(marker)
+    {
+        return vec![format!("  {marker}\\. {text}").trim_end().to_string()];
+    }
+
+    if let Some((marker, text)) = split_dot_marker(trimmed)
+        && is_korean_item_marker(marker)
+    {
+        return vec![format!("    {marker}\\. {text}").trim_end().to_string()];
+    }
+
+    vec![line.to_string()]
+}
+
+fn paragraph_marker(line: &str) -> Option<char> {
+    let marker = line.trim_start().chars().next()?;
+    is_circled_number(marker).then_some(marker)
+}
+
+fn render_structured_body(title: &str, body: &str) -> String {
+    let mut lines = Vec::new();
+    if !title.is_empty() {
+        lines.push(format!("# {title}"));
+        lines.push(String::new());
+    }
+
+    for raw_line in body.lines() {
+        let line = raw_line.trim_end();
+        if line.trim().is_empty() {
+            append_blank(&mut lines);
+            continue;
+        }
+
+        let stripped = line.trim();
+        if let Some(level) = structure_level(stripped) {
+            append_blank(&mut lines);
+            lines.push(format!("{level} {stripped}"));
+            lines.push(String::new());
+            continue;
+        }
+
+        if let Some(article) = parse_article_with_title(stripped) {
+            append_blank(&mut lines);
+            let mut heading = format!("##### 제{}조{}", article.number, article.branch);
+            if !article.title.trim().is_empty() {
+                heading.push_str(&format!(" ({})", article.title.trim()));
+            }
+            lines.push(heading);
+            lines.push(String::new());
+            if !article.body.trim().is_empty() {
+                if paragraph_marker(article.body).is_some() {
+                    append_blank(&mut lines);
+                }
+                lines.extend(render_content_line(article.body.trim()));
+            }
+            continue;
+        }
+
+        if let Some((number, branch)) = parse_deleted_article(stripped) {
+            append_blank(&mut lines);
+            lines.push(format!("##### 제{number}조{branch}"));
+            lines.push(String::new());
+            lines.push("삭제".to_string());
+            lines.push(String::new());
+            continue;
+        }
+
+        if paragraph_marker(line).is_some() {
+            append_blank(&mut lines);
+        }
+        lines.extend(render_content_line(line));
+    }
+
+    while lines.last().is_some_and(|line| line.is_empty()) {
+        lines.pop();
+    }
+    lines.join("\n")
+}
+
+fn split_dot_marker(line: &str) -> Option<(&str, &str)> {
+    let (marker, text) = line.split_once('.')?;
+    if !text.chars().next().is_some_and(char::is_whitespace) {
+        return None;
+    }
+    let text = text.trim_start();
+    if text.is_empty() {
+        None
+    } else {
+        Some((marker, text))
+    }
+}
+
+fn is_circled_number(ch: char) -> bool {
+    matches!(ch, '①'..='⑳' | '㉑'..='㉟' | '㊱'..='㊿')
+}
+
+fn is_numeric_marker(marker: &str) -> bool {
+    if let Some((head, tail)) = marker.split_once("의") {
+        !head.is_empty()
+            && head.chars().all(|ch| ch.is_ascii_digit())
+            && !tail.is_empty()
+            && tail.chars().all(|ch| ch.is_ascii_digit())
+    } else {
+        !marker.is_empty() && marker.chars().all(|ch| ch.is_ascii_digit())
+    }
+}
+
+fn is_korean_item_marker(marker: &str) -> bool {
+    let mut chars = marker.chars();
+    let Some(first) = chars.next() else {
+        return false;
+    };
+    if !matches!(first, '가'..='힣') {
+        return false;
+    }
+    let rest = chars.as_str();
+    if rest.is_empty() {
+        return true;
+    }
+    let Some(tail) = rest.strip_prefix("의") else {
+        return false;
+    };
+    !tail.is_empty() && tail.chars().all(|ch| ch.is_ascii_digit())
+}
+
+fn structure_level(line: &str) -> Option<&'static str> {
+    let rest = line.strip_prefix('제')?;
+    let (_, mut rest) = take_ascii_digits(rest)?;
+    if let Some((_, after_branch)) = take_branch(rest) {
+        rest = after_branch;
+    }
+    let mut chars = rest.chars();
+    let kind = chars.next()?;
+    let level = match kind {
+        '편' => "#",
+        '장' => "##",
+        '절' => "###",
+        '관' => "####",
+        _ => return None,
+    };
+    rest = chars.as_str();
+    if let Some((_, after_branch)) = take_branch(rest) {
+        rest = after_branch;
+    }
+    if rest.is_empty() || rest.starts_with(char::is_whitespace) {
+        Some(level)
+    } else {
+        None
+    }
+}
+
+struct ParsedArticle<'a> {
+    number: &'a str,
+    branch: &'a str,
+    title: &'a str,
+    body: &'a str,
+}
+
+fn parse_article_with_title(line: &str) -> Option<ParsedArticle<'_>> {
+    let rest = line.strip_prefix('제')?;
+    let (number, rest) = take_ascii_digits(rest)?;
+    let rest = rest.strip_prefix('조')?;
+    let (branch, rest) = take_optional_branch(rest);
+    let rest = rest.trim_start().strip_prefix('(')?;
+    let (title, body) = rest.split_once(')')?;
+    Some(ParsedArticle {
+        number,
+        branch,
+        title,
+        body: body.trim_start(),
+    })
+}
+
+fn parse_deleted_article(line: &str) -> Option<(&str, &str)> {
+    let rest = line.strip_prefix('제')?;
+    let (number, rest) = take_ascii_digits(rest)?;
+    let rest = rest.strip_prefix('조')?;
+    let (branch, rest) = take_optional_branch(rest);
+    if rest.trim() == "삭제" {
+        Some((number, branch))
+    } else {
+        None
+    }
+}
+
+fn take_optional_branch(value: &str) -> (&str, &str) {
+    take_branch(value).unwrap_or(("", value))
+}
+
+fn take_branch(value: &str) -> Option<(&str, &str)> {
+    let after_marker = value.strip_prefix("의")?;
+    let (digits, rest) = take_ascii_digits(after_marker)?;
+    let end = "의".len() + digits.len();
+    Some((&value[..end], rest))
+}
+
+fn take_ascii_digits(value: &str) -> Option<(&str, &str)> {
+    let end = value
+        .char_indices()
+        .find_map(|(idx, ch)| (!ch.is_ascii_digit()).then_some(idx))
+        .unwrap_or(value.len());
+    if end == 0 {
+        None
+    } else {
+        Some((&value[..end], &value[end..]))
+    }
+}
+
 /// Render Markdown.
 fn render_markdown(rule: &Admrule) -> String {
     let (issue_date, epoch_clamped) = issue_date(&rule.issue_date_raw);
@@ -1263,6 +1490,7 @@ fn render_markdown(rule: &Admrule) -> String {
     } else {
         escape_accidental_markdown_links(rule.body.trim())
     };
+    let body = render_structured_body(&rule.name, &body);
     let original_ministry = if rule.original_ministry.is_empty() {
         String::new()
     } else {
@@ -1345,6 +1573,48 @@ mod tests {
         let rule = parse_admrule(xml.as_bytes(), "123").unwrap();
         let markdown = render_markdown(&rule);
         assert!(markdown.contains("\\[별표 3](경력환산율표)"));
+    }
+
+    #[test]
+    fn render_markdown_structures_legal_body() {
+        let xml = "<AdmRulService><행정규칙일련번호>123</행정규칙일련번호><행정규칙ID>ABC</행정규칙ID><행정규칙명>공공주택 업무처리지침</행정규칙명><행정규칙종류>훈령</행정규칙종류><소관부처명>국토교통부</소관부처명><발령일자>20260703</발령일자><조문내용><![CDATA[제1장 총칙
+]]></조문내용><조문내용><![CDATA[제1조(목적) 이 지침은 필요한 사항을 규정함을 목적으로 한다.
+]]></조문내용><조문내용><![CDATA[제2조(적용범위) ① 이 지침은 공공주택사업에 적용한다.
+  ② 세부 사항은 다음 각 호에 따른다.
+  1. 공공임대주택
+    가. 전용면적 60제곱미터 이하 주택
+  ③ 그 밖의 사항은 별도로 정한다.
+]]></조문내용><조문내용><![CDATA[제3장의2 도심공공주택 복합사업
+]]></조문내용><조문내용><![CDATA[제16조 삭제
+]]></조문내용></AdmRulService>";
+        let rule = parse_admrule(xml.as_bytes(), "123").unwrap();
+        let markdown = render_markdown(&rule);
+
+        assert!(markdown.contains("\n# 공공주택 업무처리지침\n\n## 제1장 총칙\n"));
+        assert!(
+            markdown
+                .contains("##### 제1조 (목적)\n\n이 지침은 필요한 사항을 규정함을 목적으로 한다.")
+        );
+        assert!(
+            markdown.contains("##### 제2조 (적용범위)\n\n**①** 이 지침은 공공주택사업에 적용한다.")
+        );
+        assert!(markdown.contains("**②** 세부 사항은 다음 각 호에 따른다.\n\n  1\\. 공공임대주택"));
+        assert!(markdown.contains("    가\\. 전용면적 60제곱미터 이하 주택"));
+        assert!(markdown.contains("    가\\. 전용면적 60제곱미터 이하 주택\n\n**③** 그 밖의 사항"));
+        assert!(markdown.contains("\n## 제3장의2 도심공공주택 복합사업\n"));
+        assert!(markdown.contains("##### 제16조\n\n삭제"));
+    }
+
+    #[test]
+    fn render_markdown_preserves_ambiguous_body_lines() {
+        let xml = "<AdmRulService><행정규칙일련번호>123</행정규칙일련번호><행정규칙ID>ABC</행정규칙ID><행정규칙명>모호한 고시</행정규칙명><행정규칙종류>고시</행정규칙종류><소관부처명>행정안전부</소관부처명><발령일자>20240504</발령일자><조문내용>제1조 목적</조문내용><조문내용>1.2퍼센트 기준은 수치 표현이다.</조문내용></AdmRulService>";
+        let rule = parse_admrule(xml.as_bytes(), "123").unwrap();
+        let markdown = render_markdown(&rule);
+
+        assert!(markdown.contains("\n# 모호한 고시\n\n제1조 목적\n"));
+        assert!(!markdown.contains("##### 제1조"));
+        assert!(markdown.contains("1.2퍼센트 기준은 수치 표현이다."));
+        assert!(!markdown.contains("1\\. 2퍼센트"));
     }
 
     #[test]
