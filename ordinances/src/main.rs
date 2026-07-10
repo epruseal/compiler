@@ -106,6 +106,8 @@ struct Ordinance {
 #[derive(Debug, Clone)]
 struct Article {
     no: String,
+    branch_no: String,
+    kind: String,
     title: String,
     content: String,
 }
@@ -444,11 +446,8 @@ fn parse_ordinance(raw: &[u8], fallback_id: &str) -> Result<Ordinance> {
         field: text_value(first(&fields, &["자치법규분야명"]).unwrap_or("")),
         department: text_value(first(&fields, &["담당부서명"]).unwrap_or("")),
         body: collect_body(&fields, &["조문내용", "조내용", "본문", "내용"]),
-        articles: collect_articles(&fields),
-        addenda: fields
-            .get("부칙내용")
-            .map(|values| values.iter().map(|value| nfc(value)).collect())
-            .unwrap_or_default(),
+        articles: collect_articles(raw)?,
+        addenda: fields.get("부칙내용").cloned().unwrap_or_default(),
         attachments,
     })
 }
@@ -456,27 +455,39 @@ fn parse_ordinance(raw: &[u8], fallback_id: &str) -> Result<Ordinance> {
 /// Extract text values by tag.
 fn tag_texts(raw: &[u8]) -> Result<BTreeMap<String, Vec<String>>> {
     let mut reader = Reader::from_reader(raw);
-    reader.config_mut().trim_text(true);
-    let mut current = String::new();
+    reader.config_mut().trim_text(false);
+    let mut stack: Vec<(String, String)> = Vec::new();
     let mut fields: BTreeMap<String, Vec<String>> = BTreeMap::new();
     loop {
         match reader.read_event()? {
-            Event::Start(event) => {
-                current = String::from_utf8_lossy(event.name().as_ref()).to_string()
-            }
-            Event::Text(text) if !current.is_empty() => {
-                let value = text.decode()?.trim().to_string();
-                if !value.is_empty() {
-                    fields.entry(current.clone()).or_default().push(value);
+            Event::Start(event) => stack.push((
+                String::from_utf8_lossy(event.name().as_ref()).to_string(),
+                String::new(),
+            )),
+            Event::Text(text) => {
+                if let Some((_, value)) = stack.last_mut() {
+                    value.push_str(&text.decode()?);
                 }
             }
-            Event::CData(text) if !current.is_empty() => {
-                let value = text.decode()?.trim().to_string();
-                if !value.is_empty() {
-                    fields.entry(current.clone()).or_default().push(value);
+            Event::CData(text) => {
+                if let Some((_, value)) = stack.last_mut() {
+                    value.push_str(&text.decode()?);
                 }
             }
-            Event::End(_) => current.clear(),
+            Event::GeneralRef(reference) => {
+                if let Some((_, value)) = stack.last_mut() {
+                    let reference = reference.decode()?;
+                    let encoded = format!("&{reference};");
+                    value.push_str(&quick_xml::escape::unescape(&encoded)?);
+                }
+            }
+            Event::End(_) => {
+                if let Some((name, value)) = stack.pop()
+                    && !value.trim().is_empty()
+                {
+                    fields.entry(name).or_default().push(value);
+                }
+            }
             Event::Eof => break,
             _ => {}
         }
@@ -501,32 +512,106 @@ fn collect_body(fields: &BTreeMap<String, Vec<String>>, keys: &[&str]) -> String
     parts.join("\n\n")
 }
 
-/// Collect article vectors by positional index. This matches the simple
-/// `조문단위` shape handled by the Python converter's shared article renderer.
-fn collect_articles(fields: &BTreeMap<String, Vec<String>>) -> Vec<Article> {
-    let numbers = fields.get("조문번호").cloned().unwrap_or_default();
-    let titles = fields
-        .get("조문제목")
-        .or_else(|| fields.get("조제목"))
-        .cloned()
-        .unwrap_or_default();
-    let contents = fields
-        .get("조문내용")
-        .or_else(|| fields.get("조내용"))
-        .cloned()
-        .unwrap_or_default();
-    contents
-        .iter()
-        .enumerate()
-        .map(|(idx, content)| Article {
-            no: numbers
-                .get(idx)
-                .map(|value| normalize_article_number(value))
-                .unwrap_or_default(),
-            title: titles.get(idx).cloned().unwrap_or_default(),
-            content: nfc(content),
-        })
-        .collect()
+/// Collect article fields within each `조문단위` or `조` node.
+fn collect_articles(raw: &[u8]) -> Result<Vec<Article>> {
+    let mut reader = Reader::from_reader(raw);
+    reader.config_mut().trim_text(true);
+    let mut article_tag = String::new();
+    let mut article_depth = 0usize;
+    let mut fields: Option<BTreeMap<String, String>> = None;
+    let mut current_field = String::new();
+    let mut current_text = String::new();
+    let mut articles = Vec::new();
+
+    loop {
+        match reader.read_event()? {
+            Event::Start(event) => {
+                let name = String::from_utf8_lossy(event.name().as_ref()).to_string();
+                if fields.is_none() && matches!(name.as_str(), "조문단위" | "조") {
+                    article_tag = name;
+                    article_depth = 1;
+                    fields = Some(BTreeMap::new());
+                } else if fields.is_some() {
+                    article_depth += 1;
+                    if article_depth == 2 && is_article_field(&name) {
+                        current_field = name;
+                        current_text.clear();
+                    }
+                }
+            }
+            Event::Empty(event) if fields.is_some() => {
+                let name = String::from_utf8_lossy(event.name().as_ref()).to_string();
+                if article_depth == 1
+                    && is_article_field(&name)
+                    && let Some(article_fields) = fields.as_mut()
+                {
+                    article_fields.entry(name).or_default();
+                }
+            }
+            Event::Text(text) if !current_field.is_empty() => {
+                current_text.push_str(&text.decode()?);
+            }
+            Event::CData(text) if !current_field.is_empty() => {
+                current_text.push_str(&text.decode()?);
+            }
+            Event::GeneralRef(reference) if !current_field.is_empty() => {
+                let reference = reference.decode()?;
+                let encoded = format!("&{reference};");
+                current_text.push_str(&quick_xml::escape::unescape(&encoded)?);
+            }
+            Event::End(event) if fields.is_some() => {
+                let name = String::from_utf8_lossy(event.name().as_ref()).to_string();
+                if article_depth == 2 && current_field == name {
+                    if let Some(article_fields) = fields.as_mut() {
+                        article_fields.insert(name.clone(), current_text.trim().to_string());
+                    }
+                    current_field.clear();
+                    current_text.clear();
+                }
+                if article_depth == 1 && name == article_tag {
+                    articles.push(article_from_fields(fields.take().unwrap_or_default()));
+                    article_tag.clear();
+                    article_depth = 0;
+                } else {
+                    article_depth = article_depth.saturating_sub(1);
+                }
+            }
+            Event::Eof => break,
+            _ => {}
+        }
+    }
+    Ok(articles)
+}
+
+fn is_article_field(name: &str) -> bool {
+    matches!(
+        name,
+        "조문번호" | "조문가지번호" | "조문여부" | "조문제목" | "조제목" | "조문내용" | "조내용"
+    )
+}
+
+fn article_from_fields(fields: BTreeMap<String, String>) -> Article {
+    let raw_no = article_field(&fields, &["조문번호"]);
+    let raw_branch = article_field(&fields, &["조문가지번호"]);
+    let (no, branch_no) = split_article_number(raw_no, raw_branch);
+    let raw_kind = article_field(&fields, &["조문여부"]);
+    Article {
+        no,
+        branch_no,
+        kind: match raw_kind.to_ascii_uppercase().as_str() {
+            "Y" => "조문".to_string(),
+            "N" => "전문".to_string(),
+            _ => raw_kind.to_string(),
+        },
+        title: article_field(&fields, &["조문제목", "조제목"]).to_string(),
+        content: article_field(&fields, &["조문내용", "조내용"]).to_string(),
+    }
+}
+
+fn article_field<'a>(fields: &'a BTreeMap<String, String>, keys: &[&str]) -> &'a str {
+    keys.iter()
+        .find_map(|key| fields.get(*key).map(String::as_str))
+        .unwrap_or("")
 }
 
 fn collect_attachments(raw: &[u8]) -> Result<Vec<Attachment>> {
@@ -549,16 +634,24 @@ fn collect_attachments(raw: &[u8]) -> Result<Vec<Attachment>> {
                 }
             }
             Event::Text(text) if in_attachment && !current.is_empty() => {
-                let value = text.decode()?.trim().to_string();
-                if !value.is_empty() {
-                    fields.entry(current.clone()).or_insert(value);
-                }
+                fields
+                    .entry(current.clone())
+                    .or_default()
+                    .push_str(&text.decode()?);
             }
             Event::CData(text) if in_attachment && !current.is_empty() => {
-                let value = text.decode()?.trim().to_string();
-                if !value.is_empty() {
-                    fields.entry(current.clone()).or_insert(value);
-                }
+                fields
+                    .entry(current.clone())
+                    .or_default()
+                    .push_str(&text.decode()?);
+            }
+            Event::GeneralRef(reference) if in_attachment && !current.is_empty() => {
+                let reference = reference.decode()?;
+                let encoded = format!("&{reference};");
+                fields
+                    .entry(current.clone())
+                    .or_default()
+                    .push_str(&quick_xml::escape::unescape(&encoded)?);
             }
             Event::End(event) => {
                 let name = String::from_utf8_lossy(event.name().as_ref()).to_string();
@@ -616,6 +709,37 @@ fn normalize_article_number(value: &str) -> String {
         return number.to_string();
     }
     raw.to_string()
+}
+
+fn split_article_number(value: &str, branch_value: &str) -> (String, String) {
+    let raw = value.trim();
+    let branch = normalize_number_component(branch_value);
+    if raw.len() == 6 && raw.bytes().all(|byte| byte.is_ascii_digit()) {
+        let number = raw[..4].parse::<usize>().unwrap_or_default().to_string();
+        let encoded_branch = normalize_number_component(&raw[4..]);
+        return (
+            number,
+            if branch.is_empty() {
+                encoded_branch
+            } else {
+                branch
+            },
+        );
+    }
+    (normalize_article_number(raw), branch)
+}
+
+fn normalize_number_component(value: &str) -> String {
+    let raw = value.trim();
+    raw.parse::<usize>()
+        .map(|number| {
+            if number == 0 {
+                String::new()
+            } else {
+                number.to_string()
+            }
+        })
+        .unwrap_or_else(|_| raw.to_string())
 }
 
 /// Normalize ordinance type code to label.
@@ -837,7 +961,7 @@ fn claim_path(registry: &mut PathRegistry, path: &str, identity: &str) -> bool {
 
 /// Convert compact dates to ISO dates.
 fn format_date(raw: &str) -> String {
-    let digits = raw.replace(['.', '-'], "");
+    let digits = raw.trim().replace(['.', '-'], "");
     if is_valid_compact_date(&digits) {
         format!("{}-{}-{}", &digits[..4], &digits[4..6], &digits[6..8])
     } else {
@@ -854,7 +978,7 @@ fn promulgation_date(raw: &str) -> (String, bool) {
 }
 
 fn is_epoch_clamped(raw: &str) -> bool {
-    let digits = raw.replace(['.', '-'], "");
+    let digits = raw.trim().replace(['.', '-'], "");
     digits.len() == 8
         && digits.bytes().all(|byte| byte.is_ascii_digit())
         && (!is_valid_compact_date(&digits) || digits.as_str() < "19700101")
@@ -865,13 +989,44 @@ fn is_epoch_clamped(raw: &str) -> bool {
 fn render_articles(articles: &[Article]) -> String {
     let mut parts = Vec::new();
     for article in articles {
+        let normalized_content = normalize_article_dots(article.content.trim());
+        let content = escape_accidental_markdown_links(&normalized_content);
+        if article.title.is_empty()
+            && let Some(structure_type) = structure_type(&content)
+            && matches!(article.kind.as_str(), "전문" | "")
+        {
+            match structure_type {
+                '편' => parts.push(format!("# {content}")),
+                '장' => parts.push(format!("## {content}")),
+                '절' => parts.push(format!("### {content}")),
+                '관' => parts.push(format!("#### {content}")),
+                '항' | '속' | '목' => parts.push(format!("**{content}**")),
+                _ => unreachable!(),
+            }
+            continue;
+        }
+        if article.kind == "전문" {
+            if !content.is_empty() {
+                parts.push(content);
+            }
+            continue;
+        }
         let title_suffix = if article.title.is_empty() {
             String::new()
         } else {
             format!(" ({})", article.title)
         };
-        parts.push(format!("##### 제{}조{}", article.no, title_suffix));
-        let stripped = strip_article_prefix(&article.content, &article.no, &article.title);
+        let branch_suffix = if article.branch_no.is_empty() {
+            String::new()
+        } else {
+            format!("의{}", article.branch_no)
+        };
+        parts.push(format!(
+            "##### 제{}조{}{}",
+            article.no, branch_suffix, title_suffix
+        ));
+        let stripped =
+            strip_article_prefix(&content, &article.no, &article.branch_no, &article.title);
         if !stripped.is_empty() {
             parts.push(stripped);
         }
@@ -879,14 +1034,63 @@ fn render_articles(articles: &[Article]) -> String {
     parts.join("\n\n")
 }
 
-fn strip_article_prefix(content: &str, no: &str, title: &str) -> String {
-    if !no.is_empty() && !title.is_empty() {
-        let prefix = format!("제{}조({})", no, title);
-        if let Some(rest) = content.strip_prefix(&prefix) {
-            return rest.trim().to_string();
+fn structure_type(content: &str) -> Option<char> {
+    let mut seen_number = false;
+    for character in content.strip_prefix('제')?.trim_start().chars() {
+        if character.is_numeric() || "일이삼사오육칠팔구십".contains(character) {
+            seen_number = true;
+            continue;
+        }
+        if character == '의' || character.is_whitespace() {
+            continue;
+        }
+        return (seen_number && "편장절관항속목".contains(character)).then_some(character);
+    }
+    None
+}
+
+fn normalize_article_dots(content: &str) -> String {
+    content
+        .chars()
+        .map(|character| match character {
+            '·' | '・' | '･' => 'ㆍ',
+            other => other,
+        })
+        .collect()
+}
+
+fn strip_article_prefix(content: &str, _no: &str, _branch_no: &str, _title: &str) -> String {
+    let Some(mut rest) = content.strip_prefix('제') else {
+        return content.trim().to_string();
+    };
+    let number_len = rest
+        .chars()
+        .take_while(char::is_ascii_digit)
+        .map(char::len_utf8)
+        .sum::<usize>();
+    if number_len == 0 {
+        return content.trim().to_string();
+    }
+    rest = &rest[number_len..];
+    let Some(after_article) = rest.strip_prefix('조') else {
+        return content.trim().to_string();
+    };
+    rest = after_article;
+    if let Some(after_branch_marker) = rest.strip_prefix('의') {
+        let branch_len = after_branch_marker
+            .chars()
+            .take_while(char::is_ascii_digit)
+            .map(char::len_utf8)
+            .sum::<usize>();
+        if branch_len > 0 {
+            rest = &after_branch_marker[branch_len..];
         }
     }
-    content.trim().to_string()
+    rest = rest.trim_start();
+    if let Some(title_end) = rest.strip_prefix('(').and_then(|value| value.find(')')) {
+        rest = &rest[title_end + 2..];
+    }
+    rest.trim().to_string()
 }
 
 fn public_source_url(ordinance: &Ordinance) -> String {
@@ -905,15 +1109,43 @@ fn render_attachments_yaml(attachments: &[Attachment]) -> String {
     let mut out = String::from("첨부파일:\n");
     for attachment in attachments {
         out.push_str(&format!(
-            "  - 별표번호: {}\n    별표가지번호: {}\n    별표구분: {}\n    제목: {}\n    파일형식: {}\n    파일링크: {}\n",
+            "  - 별표번호: {}\n    별표가지번호: {}\n    별표구분: {}\n",
             yaml_string(&attachment.bylaw_no),
             yaml_string(&attachment.branch_no),
             yaml_string(&attachment.kind),
-            yaml_string(&attachment.title),
+        ));
+        out.push_str(&yaml_wrapped_mapping_value(
+            "    제목: ",
+            "      ",
+            &attachment.title,
+        ));
+        out.push_str(&format!(
+            "    파일형식: {}\n    파일링크: {}\n",
             yaml_string(&attachment.file_type),
             yaml_string(&attachment.file_link),
         ));
     }
+    out
+}
+
+fn yaml_wrapped_mapping_value(prefix: &str, continuation: &str, value: &str) -> String {
+    let escaped = value.replace('\'', "''");
+    let mut words = escaped.split(' ');
+    let mut line = format!("{prefix}'{}", words.next().unwrap_or_default());
+    let mut out = String::new();
+    for word in words {
+        if line.chars().count() > 80 {
+            out.push_str(&line);
+            out.push('\n');
+            out.push_str(continuation);
+            line = word.to_string();
+        } else {
+            line.push(' ');
+            line.push_str(word);
+        }
+    }
+    out.push_str(&line);
+    out.push_str("'\n");
     out
 }
 
@@ -927,13 +1159,17 @@ fn render_markdown(ordinance: &Ordinance) -> String {
     } else {
         escape_accidental_markdown_links(ordinance.body.trim())
     };
+    let mut rendered_addenda_heading = false;
     for addendum in &ordinance.addenda {
         let content = escape_accidental_markdown_links(addendum.trim());
         if !content.is_empty() {
             if !body_text.trim().is_empty() {
                 body_text.push_str("\n\n");
             }
-            body_text.push_str("## 부칙\n\n");
+            if !rendered_addenda_heading {
+                body_text.push_str("## 부칙\n\n");
+                rendered_addenda_heading = true;
+            }
             body_text.push_str(&content);
         }
     }
@@ -950,29 +1186,50 @@ fn render_markdown(ordinance: &Ordinance) -> String {
     let attachments_yaml = render_attachments_yaml(&ordinance.attachments);
     let (promulgation_date, promulgation_date_clamped) =
         promulgation_date(&ordinance.prom_date_raw);
-    format!(
-        "---\n자치법규ID: {}\n자치법규일련번호: {}\n자치법규명: {}\n자치법규종류: {}\n지자체기관명: {}\n지자체구분:\n  광역: {}\n  기초: {}\n공포일자: {}\n공포번호: {}\n시행일자: {}\n제개정구분: {}\n자치법규분야: {}\n담당부서: {}\n본문출처: {}\n출처: {}\n{}공포일자보정: {}\n공포일자원문: {}\n---\n\n# {}\n\n{}\n",
-        yaml_string(&ordinance.id),
-        yaml_string(&ordinance.serial),
-        yaml_string(&ordinance.name),
-        yaml_string(&ordinance.ordinance_type),
-        yaml_string(&ordinance.jurisdiction),
-        yaml_string(&gwangyeok),
-        yaml_string(&gicho),
-        promulgation_date,
-        yaml_string(&ordinance.prom_no),
-        yaml_string(&format_date(&ordinance.effective_date_raw)),
-        yaml_string(&ordinance.amendment),
-        yaml_string(&ordinance.field),
-        yaml_string(&ordinance.department),
-        yaml_string(body_source),
-        yaml_string(&public_source_url(ordinance)),
-        attachments_yaml,
-        promulgation_date_clamped,
-        yaml_string(&ordinance.prom_date_raw),
-        ordinance.name,
-        body
-    )
+    let mut frontmatter = String::from("---\n");
+    for (key, value) in [
+        ("자치법규ID", ordinance.id.as_str()),
+        ("자치법규일련번호", ordinance.serial.as_str()),
+        ("자치법규명", ordinance.name.as_str()),
+        ("자치법규종류", ordinance.ordinance_type.as_str()),
+        ("지자체기관명", ordinance.jurisdiction.as_str()),
+    ] {
+        frontmatter.push_str(&yaml_wrapped_mapping_value(
+            &format!("{key}: "),
+            "  ",
+            value,
+        ));
+    }
+    frontmatter.push_str("지자체구분:\n");
+    frontmatter.push_str(&yaml_wrapped_mapping_value("  광역: ", "    ", &gwangyeok));
+    frontmatter.push_str(&yaml_wrapped_mapping_value("  기초: ", "    ", &gicho));
+    frontmatter.push_str(&format!("공포일자: {promulgation_date}\n"));
+    for (key, value) in [
+        ("공포번호", ordinance.prom_no.as_str()),
+        (
+            "시행일자",
+            format_date(&ordinance.effective_date_raw).as_str(),
+        ),
+        ("제개정구분", ordinance.amendment.as_str()),
+        ("자치법규분야", ordinance.field.as_str()),
+        ("담당부서", ordinance.department.as_str()),
+        ("본문출처", body_source),
+        ("출처", public_source_url(ordinance).as_str()),
+    ] {
+        frontmatter.push_str(&yaml_wrapped_mapping_value(
+            &format!("{key}: "),
+            "  ",
+            value,
+        ));
+    }
+    frontmatter.push_str(&attachments_yaml);
+    frontmatter.push_str(&format!("공포일자보정: {promulgation_date_clamped}\n"));
+    frontmatter.push_str(&yaml_wrapped_mapping_value(
+        "공포일자원문: ",
+        "  ",
+        &ordinance.prom_date_raw,
+    ));
+    format!("{frontmatter}---\n\n# {}\n\n{}\n", ordinance.name, body)
 }
 
 fn yaml_string(value: &str) -> String {
@@ -1066,6 +1323,41 @@ mod tests {
             ("제주특별자치도".to_string(), "_교육청".to_string())
         );
         assert!(render_markdown(&ordinance).contains("##### 제1조 (목적)"));
+    }
+
+    #[test]
+    fn preserves_structure_branch_and_article_titles() {
+        let xml = r#"<Ordin>
+            <자치법규ID>2198287</자치법규ID>
+            <자치법규명>남동구 재난 및 안전관리 기본 조례</자치법규명>
+            <자치법규종류>C0001</자치법규종류>
+            <지자체기관명>인천광역시 남동구</지자체기관명>
+            <조문>
+                <조><조문번호>000000</조문번호><조문여부>N</조문여부><조제목></조제목><조내용>제1장 총칙</조내용></조>
+                <조><조문번호>000100</조문번호><조문여부>Y</조문여부><조제목>목적</조제목><조내용>제1조(목적) 이 조례는 테스트를 목적으로 한다.</조내용></조>
+                <조><조문번호>000702</조문번호><조문여부>Y</조문여부><조제목>재난안전예산조정위원회</조제목><조내용>제7조의2(재난안전예산조정위원회) 위원회를 둔다.</조내용></조>
+                <조><조문번호>001000</조문번호><조문여부>Y</조문여부><조제목>관계기관 등의 협조</조제목><조내용>제10조(관계기관 등의 협조) 관계 기관·단체에 협조를 요청할 수 있다.</조내용></조>
+            </조문>
+        </Ordin>"#;
+        let ordinance = parse_ordinance(xml.as_bytes(), "2198287").unwrap();
+
+        assert_eq!(ordinance.articles.len(), 4);
+        assert_eq!(ordinance.articles[0].no, "0");
+        assert_eq!(ordinance.articles[0].kind, "전문");
+        assert_eq!(ordinance.articles[1].title, "목적");
+        assert_eq!(ordinance.articles[2].no, "7");
+        assert_eq!(ordinance.articles[2].branch_no, "2");
+        assert_eq!(ordinance.articles[2].title, "재난안전예산조정위원회");
+        assert_eq!(ordinance.articles[3].title, "관계기관 등의 협조");
+
+        let markdown = render_markdown(&ordinance);
+        assert!(markdown.contains("## 제1장 총칙"));
+        assert!(!markdown.contains("##### 제0조"));
+        assert!(!markdown.contains("##### 제702조"));
+        assert!(markdown.contains("##### 제1조 (목적)\n\n이 조례는 테스트를 목적으로 한다."));
+        assert!(markdown.contains("##### 제7조의2 (재난안전예산조정위원회)\n\n위원회를 둔다."));
+        assert!(markdown.contains("##### 제10조 (관계기관 등의 협조)"));
+        assert!(markdown.contains("관계 기관ㆍ단체에 협조를 요청할 수 있다."));
     }
 
     #[test]
