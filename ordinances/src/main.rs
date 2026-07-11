@@ -102,6 +102,12 @@ struct Ordinance {
     attachments: Vec<Attachment>,
 }
 
+impl Ordinance {
+    fn is_repeal(&self) -> bool {
+        self.amendment.contains("폐지")
+    }
+}
+
 /// Parsed ordinance article unit.
 #[derive(Debug, Clone)]
 struct Article {
@@ -182,6 +188,19 @@ fn compile_bare_repo_with_manifest(
         INITIAL_COMMIT_EPOCH,
     )?;
     for entry in &entries {
+        if entry.delete_only {
+            let deletions = entry
+                .previous_path
+                .iter()
+                .map(RepoPathBuf::file)
+                .collect::<Vec<_>>();
+            repo.commit_bot_deletions(
+                &deletions,
+                &entry.message,
+                GitTimestampKst::from_epoch(entry.timestamp),
+            )?;
+            continue;
+        }
         let (blob_sha, compressed_blob) = precompute_blob(&entry.content);
         if let Some(previous_path) = &entry.previous_path {
             repo.commit_bot_file_with_deletions(
@@ -213,7 +232,7 @@ fn compile_bare_repo_with_manifest(
             },
         )?;
     }
-    eprintln!("committed {} ordinance markdown files", entries.len());
+    eprintln!("committed {} ordinance revisions", entries.len());
     Ok(())
 }
 
@@ -254,6 +273,7 @@ struct ImportEntry {
     path: String,
     previous_path: Option<String>,
     identity: String,
+    delete_only: bool,
     content: Vec<u8>,
     message: String,
     timestamp: i64,
@@ -268,8 +288,7 @@ fn render_ordinance_entries(cache_dir: &Path, limit: Option<usize>) -> Result<Ve
     if let Some(limit) = limit {
         files.truncate(limit);
     }
-    let mut registry = PathRegistry::new();
-    let mut entries = Vec::with_capacity(files.len());
+    let mut candidates: BTreeMap<String, (u8, Ordinance)> = BTreeMap::new();
     let mut skipped = 0usize;
     for path in files {
         let raw = fs::read(&path).with_context(|| format!("failed to read {}", path.display()))?;
@@ -294,16 +313,51 @@ fn render_ordinance_entries(cache_dir: &Path, limit: Option<usize>) -> Result<Ve
             skipped += 1;
             continue;
         }
+        let cache_key = path.file_stem().and_then(|s| s.to_str()).unwrap_or("");
+        let serial_key = if ordinance.serial.is_empty() {
+            format!("path:{}", path.display())
+        } else {
+            ordinance.serial.clone()
+        };
+        let priority = if path.parent() == Some(&cache_dir.join("history")) {
+            2
+        } else if cache_key == ordinance.serial {
+            1
+        } else {
+            0
+        };
+        if let Some((_, previous)) = candidates.get(&serial_key)
+            && previous.id != ordinance.id
+        {
+            anyhow::bail!(
+                "duplicate 자치법규일련번호 {}: {} != {}",
+                ordinance.serial,
+                previous.id,
+                ordinance.id
+            );
+        }
+        if candidates
+            .get(&serial_key)
+            .is_none_or(|(previous_priority, _)| priority >= *previous_priority)
+        {
+            candidates.insert(serial_key, (priority, ordinance));
+        }
+    }
+
+    let mut registry = PathRegistry::new();
+    let mut entries = Vec::with_capacity(candidates.len());
+    for (_, (_, ordinance)) in candidates {
         let rel = ordinance_path(&ordinance, &mut registry);
         entries.push(ImportEntry {
             path: rel.to_string_lossy().replace('\\', "/"),
             previous_path: None,
             identity: ordinance.id.clone(),
+            delete_only: ordinance.is_repeal(),
             content: render_markdown(&ordinance).into_bytes(),
             message: ordinance_commit_message(&ordinance),
             timestamp: commit_timestamp(&ordinance.prom_date_raw)?,
-            sort_date: compact_date_or_epoch(&ordinance.prom_date_raw),
-            sort_id: ordinance.id.parse::<u64>().unwrap_or(u64::MAX),
+            sort_date: compact_sort_date(&ordinance.prom_date_raw),
+            sort_id: ordinance.serial.parse::<u64>().unwrap_or(u64::MAX),
         });
     }
     entries.sort_by(|a, b| {
@@ -323,7 +377,10 @@ fn render_ordinance_entries(cache_dir: &Path, limit: Option<usize>) -> Result<Ve
 fn assign_previous_paths(entries: &mut [ImportEntry]) {
     let mut latest_paths = BTreeMap::new();
     for entry in entries {
-        if let Some(previous_path) = latest_paths.insert(entry.identity.clone(), entry.path.clone())
+        if entry.delete_only {
+            entry.previous_path = latest_paths.remove(&entry.identity);
+        } else if let Some(previous_path) =
+            latest_paths.insert(entry.identity.clone(), entry.path.clone())
             && previous_path != entry.path
         {
             entry.previous_path = Some(previous_path);
@@ -350,6 +407,15 @@ fn compact_date_or_epoch(raw: &str) -> String {
         } else {
             digits
         }
+    } else {
+        "19700101".to_string()
+    }
+}
+
+fn compact_sort_date(raw: &str) -> String {
+    let digits = raw.replace(['.', '-'], "");
+    if is_valid_compact_date(&digits) {
+        digits
     } else {
         "19700101".to_string()
     }
@@ -392,6 +458,16 @@ fn compile_dir(cache_dir: &Path, output: &Path, limit: Option<usize>) -> Result<
     fs::write(output.join("README.md"), REPOSITORY_README)?;
     let entries = render_ordinance_entries(cache_dir, limit)?;
     for entry in &entries {
+        if entry.delete_only {
+            if let Some(previous_path) = &entry.previous_path {
+                let previous = output.join(previous_path);
+                if previous.exists() {
+                    fs::remove_file(&previous)
+                        .with_context(|| format!("failed to remove {}", previous.display()))?;
+                }
+            }
+            continue;
+        }
         if let Some(previous_path) = &entry.previous_path {
             let previous = output.join(previous_path);
             if previous.exists() {
@@ -409,15 +485,20 @@ fn compile_dir(cache_dir: &Path, output: &Path, limit: Option<usize>) -> Result<
     Ok(())
 }
 
-/// Return sorted XML files from a flat cache directory.
+/// Return sorted XML files from the legacy root and serial-key history directory.
 fn read_xml_files(cache_dir: &Path) -> Result<Vec<PathBuf>> {
     let mut files = Vec::new();
-    for entry in fs::read_dir(cache_dir)
-        .with_context(|| format!("failed to read {}", cache_dir.display()))?
-    {
-        let path = entry?.path();
-        if path.extension().and_then(|s| s.to_str()) == Some("xml") {
-            files.push(path);
+    for dir in [cache_dir.to_path_buf(), cache_dir.join("history")] {
+        if !dir.exists() {
+            continue;
+        }
+        for entry in
+            fs::read_dir(&dir).with_context(|| format!("failed to read {}", dir.display()))?
+        {
+            let path = entry?.path();
+            if path.extension().and_then(|s| s.to_str()) == Some("xml") {
+                files.push(path);
+            }
         }
     }
     files.sort();
@@ -442,7 +523,9 @@ fn parse_ordinance(raw: &[u8], fallback_id: &str) -> Result<Ordinance> {
         prom_date_raw: first(&fields, &["공포일자"]).unwrap_or("").to_string(),
         prom_no: first(&fields, &["공포번호"]).unwrap_or("").to_string(),
         effective_date_raw: first(&fields, &["시행일자"]).unwrap_or("").to_string(),
-        amendment: text_value(first(&fields, &["제개정구분명", "제개정구분"]).unwrap_or("")),
+        amendment: text_value(
+            first(&fields, &["제개정정보", "제개정구분명", "제개정구분"]).unwrap_or(""),
+        ),
         field: text_value(first(&fields, &["자치법규분야명"]).unwrap_or("")),
         department: text_value(first(&fields, &["담당부서명"]).unwrap_or("")),
         body: collect_body(&fields, &["조문내용", "조내용", "본문", "내용"]),
@@ -869,7 +952,7 @@ fn is_windows_reserved_path_part(value: &str) -> bool {
 
 /// Split jurisdiction into `(광역, 기초)`.
 fn split_jurisdiction(raw: &str) -> Result<(String, String)> {
-    const GWANGYEOK: [&str; 18] = [
+    const GWANGYEOK: [&str; 19] = [
         "서울특별시",
         "부산광역시",
         "대구광역시",
@@ -881,6 +964,7 @@ fn split_jurisdiction(raw: &str) -> Result<(String, String)> {
         "강원특별자치도",
         "전북특별자치도",
         "제주특별자치도",
+        "전남광주통합특별시",
         "충청북도",
         "충청남도",
         "전라남도",
@@ -1374,6 +1458,14 @@ mod tests {
             split_jurisdiction("제주도 제주시").unwrap(),
             ("제주특별자치도".to_string(), "제주시".to_string())
         );
+        assert_eq!(
+            split_jurisdiction("전남광주통합특별시 남구").unwrap(),
+            ("전남광주통합특별시".to_string(), "남구".to_string())
+        );
+        assert_eq!(
+            split_jurisdiction("전남광주통합특별시교육청").unwrap(),
+            ("전남광주통합특별시".to_string(), "_교육청".to_string())
+        );
     }
 
     #[test]
@@ -1426,6 +1518,7 @@ mod tests {
             ("1970-01-01".to_string(), true)
         );
         assert_eq!(compact_date_or_epoch("19691231"), "19700101");
+        assert_eq!(compact_sort_date("19691231"), "19691231");
         assert_eq!(
             commit_timestamp("20240231").unwrap(),
             commit_timestamp("19700101").unwrap()
@@ -1490,6 +1583,39 @@ mod tests {
     }
 
     #[test]
+    fn bare_repo_deduplicates_legacy_id_and_history_serial() {
+        let temp = tempfile::tempdir().unwrap();
+        let cache = temp.path().join("cache");
+        let history = cache.join("history");
+        fs::create_dir_all(&history).unwrap();
+        let legacy = "<Ordin><자치법규ID>2000111</자치법규ID><자치법규일련번호>1</자치법규일련번호><자치법규명>서울특별시 테스트 조례</자치법규명><자치법규종류>C0001</자치법규종류><지자체기관명>서울특별시</지자체기관명><공포일자>20240504</공포일자><공포번호>1</공포번호><조문내용>legacy</조문내용></Ordin>";
+        let historical = legacy.replace("legacy", "historical");
+        fs::write(cache.join("2000111.xml"), legacy).unwrap();
+        fs::write(history.join("1.xml"), historical).unwrap();
+        let repo = temp.path().join("out.git");
+
+        compile_bare_repo(&cache, &repo, None).unwrap();
+
+        assert_eq!(git_stdout(&repo, ["rev-list", "--count", "--all"]), "2");
+        let checkout = temp.path().join("checkout");
+        assert!(
+            Command::new("git")
+                .args(["clone", "--quiet"])
+                .arg(&repo)
+                .arg(&checkout)
+                .status()
+                .unwrap()
+                .success()
+        );
+        let markdown = fs::read_to_string(
+            checkout.join("서울특별시/_본청/조례/서울특별시 테스트 조례/본문.md"),
+        )
+        .unwrap();
+        assert!(markdown.contains("historical"));
+        assert!(!markdown.contains("legacy"));
+    }
+
+    #[test]
     fn bare_repo_removes_stale_path_when_ordinance_path_changes() {
         let temp = tempfile::tempdir().unwrap();
         let cache = temp.path().join("cache");
@@ -1513,6 +1639,80 @@ mod tests {
         let files = git_stdout(&repo, ["ls-tree", "-r", "--name-only", "HEAD"]);
         assert!(files.contains("서울특별시/_본청/조례/새 조례/본문.md"));
         assert!(!files.contains("서울특별시/_본청/조례/이전 조례/본문.md"));
+    }
+
+    #[test]
+    fn bare_repo_commits_repealed_ordinance_as_deletion() {
+        let temp = tempfile::tempdir().unwrap();
+        let cache = temp.path().join("cache");
+        fs::create_dir(&cache).unwrap();
+        fs::write(
+            cache.join("100.xml"),
+            "<Ordin><자치법규ID>2000111</자치법규ID><자치법규일련번호>1</자치법규일련번호><자치법규명>서울특별시 폐지대상 조례</자치법규명><자치법규종류>C0001</자치법규종류><지자체기관명>서울특별시</지자체기관명><공포일자>20240101</공포일자><공포번호>1</공포번호><제개정정보>제정</제개정정보><조문내용>이전 본문</조문내용></Ordin>",
+        )
+        .unwrap();
+        fs::write(
+            cache.join("200.xml"),
+            "<Ordin><자치법규ID>2000111</자치법규ID><자치법규일련번호>2</자치법규일련번호><자치법규명>서울특별시 폐지대상 조례</자치법규명><자치법규종류>C0001</자치법규종류><지자체기관명>서울특별시</지자체기관명><공포일자>20240201</공포일자><공포번호>2</공포번호><제개정정보>폐지</제개정정보><조문내용>폐지 본문</조문내용></Ordin>",
+        )
+        .unwrap();
+        let repo = temp.path().join("out.git");
+
+        compile_bare_repo(&cache, &repo, None).unwrap();
+
+        git_ok(&repo, ["fsck", "--full"]);
+        assert_eq!(git_stdout(&repo, ["rev-list", "--count", "--all"]), "3");
+        let files = git_stdout(&repo, ["ls-tree", "-r", "--name-only", "HEAD"]);
+        assert!(!files.contains("서울특별시/_본청/조례/서울특별시 폐지대상 조례/본문.md"));
+    }
+
+    #[test]
+    fn bare_repo_commits_repeal_without_cached_predecessor() {
+        let temp = tempfile::tempdir().unwrap();
+        let cache = temp.path().join("cache");
+        fs::create_dir(&cache).unwrap();
+        fs::write(
+            cache.join("2.xml"),
+            "<Ordin><자치법규ID>2000111</자치법규ID><자치법규일련번호>2</자치법규일련번호><자치법규명>서울특별시 폐지대상 조례</자치법규명><자치법규종류>C0001</자치법규종류><지자체기관명>서울특별시</지자체기관명><공포일자>20240201</공포일자><공포번호>2</공포번호><제개정정보>폐지</제개정정보><조문내용>폐지 본문</조문내용></Ordin>",
+        )
+        .unwrap();
+        let repo = temp.path().join("out.git");
+
+        compile_bare_repo(&cache, &repo, None).unwrap();
+
+        git_ok(&repo, ["fsck", "--full"]);
+        assert_eq!(git_stdout(&repo, ["rev-list", "--count", "--all"]), "2");
+        assert_eq!(
+            git_stdout(&repo, ["ls-tree", "-r", "--name-only", "HEAD"]),
+            "README.md"
+        );
+        assert!(git_stdout(&repo, ["log", "-1", "--format=%B"]).contains("자치법규일련번호: 2"));
+    }
+
+    #[test]
+    fn bare_repo_orders_pre_epoch_revisions_by_real_date_before_clamping_timestamp() {
+        let temp = tempfile::tempdir().unwrap();
+        let cache = temp.path().join("cache");
+        fs::create_dir(&cache).unwrap();
+        fs::write(
+            cache.join("700910.xml"),
+            "<Ordin><자치법규ID>2139677</자치법규ID><자치법규일련번호>700910</자치법규일련번호><자치법규명>仁川市立第三市民館設置條例</자치법규명><자치법규종류>C0001</자치법규종류><지자체기관명>인천광역시</지자체기관명><공포일자>19690217</공포일자><제개정정보>폐지</제개정정보></Ordin>",
+        )
+        .unwrap();
+        fs::write(
+            cache.join("702913.xml"),
+            "<Ordin><자치법규ID>2139677</자치법규ID><자치법규일련번호>702913</자치법규일련번호><자치법규명>仁川市立第三市民館設置條例</자치법규명><자치법규종류>C0001</자치법규종류><지자체기관명>인천광역시</지자체기관명><공포일자>19590105</공포일자><제개정정보>제정</제개정정보></Ordin>",
+        )
+        .unwrap();
+        let repo = temp.path().join("out.git");
+
+        compile_bare_repo(&cache, &repo, None).unwrap();
+
+        assert_eq!(git_stdout(&repo, ["rev-list", "--count", "--all"]), "3");
+        assert_eq!(
+            git_stdout(&repo, ["ls-tree", "-r", "--name-only", "HEAD"]),
+            "README.md"
+        );
     }
 
     #[test]
@@ -1547,6 +1747,32 @@ mod tests {
     }
 
     #[test]
+    fn compile_dir_removes_repealed_ordinance_from_head() {
+        let temp = tempfile::tempdir().unwrap();
+        let cache = temp.path().join("cache");
+        fs::create_dir(&cache).unwrap();
+        fs::write(
+            cache.join("100.xml"),
+            "<Ordin><자치법규ID>2000111</자치법규ID><자치법규일련번호>1</자치법규일련번호><자치법규명>서울특별시 폐지대상 조례</자치법규명><자치법규종류>C0001</자치법규종류><지자체기관명>서울특별시</지자체기관명><공포일자>20240101</공포일자><공포번호>1</공포번호><제개정정보>제정</제개정정보><조문내용>이전 본문</조문내용></Ordin>",
+        )
+        .unwrap();
+        fs::write(
+            cache.join("200.xml"),
+            "<Ordin><자치법규ID>2000111</자치법규ID><자치법규일련번호>2</자치법규일련번호><자치법규명>서울특별시 폐지대상 조례</자치법규명><자치법규종류>C0001</자치법규종류><지자체기관명>서울특별시</지자체기관명><공포일자>20240201</공포일자><공포번호>2</공포번호><제개정정보>폐지</제개정정보><조문내용>폐지 본문</조문내용></Ordin>",
+        )
+        .unwrap();
+        let output = temp.path().join("out");
+
+        compile_dir(&cache, &output, None).unwrap();
+
+        assert!(
+            !output
+                .join("서울특별시/_본청/조례/서울특별시 폐지대상 조례/본문.md")
+                .exists()
+        );
+    }
+
+    #[test]
     fn compile_dir_applies_revisions_in_promulgation_order() {
         let temp = tempfile::tempdir().unwrap();
         let cache = temp.path().join("cache");
@@ -1572,6 +1798,34 @@ mod tests {
         assert!(markdown.contains("공포번호: '2'"));
         assert!(markdown.contains("최신 본문"));
         assert!(!markdown.contains("이전 본문"));
+    }
+
+    #[test]
+    fn compile_dir_applies_same_day_revisions_by_serial() {
+        let temp = tempfile::tempdir().unwrap();
+        let cache = temp.path().join("cache");
+        fs::create_dir(&cache).unwrap();
+        fs::write(
+            cache.join("200.xml"),
+            "<Ordin><자치법규ID>2000111</자치법규ID><자치법규일련번호>2</자치법규일련번호><자치법규명>서울특별시 테스트 조례</자치법규명><자치법규종류>C0001</자치법규종류><지자체기관명>서울특별시</지자체기관명><공포일자>20240504</공포일자><공포번호>2</공포번호><조문내용>같은 날 최신 본문</조문내용></Ordin>",
+        )
+        .unwrap();
+        fs::write(
+            cache.join("100.xml"),
+            "<Ordin><자치법규ID>2000111</자치법규ID><자치법규일련번호>1</자치법규일련번호><자치법규명>서울특별시 테스트 조례</자치법규명><자치법규종류>C0001</자치법규종류><지자체기관명>서울특별시</지자체기관명><공포일자>20240504</공포일자><공포번호>1</공포번호><조문내용>같은 날 이전 본문</조문내용></Ordin>",
+        )
+        .unwrap();
+        let output = temp.path().join("out");
+
+        compile_dir(&cache, &output, None).unwrap();
+
+        let markdown =
+            fs::read_to_string(output.join("서울특별시/_본청/조례/서울특별시 테스트 조례/본문.md"))
+                .unwrap();
+        assert!(markdown.contains("자치법규일련번호: '2'"));
+        assert!(markdown.contains("공포번호: '2'"));
+        assert!(markdown.contains("같은 날 최신 본문"));
+        assert!(!markdown.contains("같은 날 이전 본문"));
     }
 
     #[test]
