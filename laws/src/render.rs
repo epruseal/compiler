@@ -1,6 +1,7 @@
 use std::sync::OnceLock;
 
 use anyhow::{Result, bail};
+use git_writer::escape_accidental_markdown_links;
 use regex::Regex;
 use rustc_hash::FxHashMap as HashMap;
 use serde::Serialize;
@@ -9,7 +10,12 @@ use crate::git_repo::RepoPathBuf;
 use crate::xml_parser::{Attachment, LawDetail, LawMetadata};
 
 /// Child-law suffixes that share a parent directory in the output tree.
-const CHILD_SUFFIXES: [(&str, &str); 2] = [(" 시행규칙", "시행규칙"), (" 시행령", "시행령")];
+const CHILD_SUFFIXES: [(&str, &str); 4] = [
+    (" 시행규칙", "시행규칙"),
+    ("시행규칙", "시행규칙"),
+    (" 시행령", "시행령"),
+    ("시행령", "시행령"),
+];
 
 /// Classification of a planned entry relative to parent-law grouping.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -317,7 +323,8 @@ pub fn law_to_markdown(detail: &LawDetail) -> Result<Vec<u8>> {
             let number = &article.number;
             let branch_number = &article.branch_number;
             let title = &article.title;
-            let content = normalize_law_name(article.content.trim());
+            let content =
+                escape_accidental_markdown_links(&normalize_law_name(article.content.trim()));
 
             if title.is_empty()
                 && let Some(captures) = structure_re.captures(&content)
@@ -372,7 +379,8 @@ pub fn law_to_markdown(detail: &LawDetail) -> Result<Vec<u8>> {
             }
 
             for paragraph in &article.paragraphs {
-                let content = normalize_law_name(&paragraph.content);
+                let content =
+                    escape_accidental_markdown_links(&normalize_law_name(&paragraph.content));
                 if !content.is_empty() {
                     let stripped = circled_prefix_re.replace(content.trim(), "").to_string();
                     let prefix = if paragraph.number.is_empty() {
@@ -387,7 +395,9 @@ pub fn law_to_markdown(detail: &LawDetail) -> Result<Vec<u8>> {
                 }
 
                 for subparagraph in &paragraph.subparagraphs {
-                    let content = normalize_law_name(&subparagraph.content);
+                    let content = escape_accidental_markdown_links(&normalize_law_name(
+                        &subparagraph.content,
+                    ));
                     if !content.is_empty() {
                         let stripped = ho_prefix_re.replace(content.trim(), "").to_string();
                         let stripped = normalize_ws(&stripped);
@@ -403,7 +413,8 @@ pub fn law_to_markdown(detail: &LawDetail) -> Result<Vec<u8>> {
                     }
 
                     for item in &subparagraph.items {
-                        let content = normalize_law_name(&item.content);
+                        let content =
+                            escape_accidental_markdown_links(&normalize_law_name(&item.content));
                         if !content.is_empty() {
                             let stripped = mok_prefix_re.replace(content.trim(), "").to_string();
                             let stripped = normalize_ws(&stripped);
@@ -439,7 +450,7 @@ pub fn law_to_markdown(detail: &LawDetail) -> Result<Vec<u8>> {
         body_parts.push(String::from("## 부칙"));
         body_parts.push(String::new());
         for addendum in &detail.addenda {
-            let content = addendum.content.trim();
+            let content = escape_accidental_markdown_links(addendum.content.trim());
             if !content.is_empty() {
                 // Addenda often arrive indented as CDATA blocks, so strip common leading padding.
                 let dedented = {
@@ -629,6 +640,28 @@ mod tests {
     }
 
     #[test]
+    fn child_classification_handles_names_without_suffix_space() {
+        let mut registry = PathRegistry::default();
+        let (path, kind) = registry.get_law_path("법인세법시행령", "대통령령", "003608");
+        assert_eq!(path, RepoPathBuf::kr_file("법인세법", "시행령.md"));
+        assert_eq!(
+            kind,
+            EntryKind::Child {
+                parent_group: String::from("법인세법"),
+            }
+        );
+
+        let (path, kind) = registry.get_law_path("법인세법시행규칙", "기획재정부령", "003609");
+        assert_eq!(path, RepoPathBuf::kr_file("법인세법", "시행규칙.md"));
+        assert_eq!(
+            kind,
+            EntryKind::Child {
+                parent_group: String::from("법인세법"),
+            }
+        );
+    }
+
+    #[test]
     fn path_registry_treats_ministry_rename_as_same_law() {
         let mut registry = PathRegistry::default();
         // Same law_id, different law_type (ministry rename) → same path
@@ -729,6 +762,37 @@ mod tests {
         assert!(markdown.contains("  1\\. 첫 호"));
         assert!(markdown.contains("    가\\. 첫 목"));
         assert!(markdown.contains("## 부칙"));
+    }
+
+    #[test]
+    fn markdown_escapes_accidental_markdown_links() {
+        let detail = LawDetail {
+            metadata: LawMetadata {
+                mst: String::from("1"),
+                law_name: String::from("테스트법"),
+                law_id: String::from("000001"),
+                law_type: String::from("법률"),
+                promulgation_date: String::from("20240101"),
+                promulgation_number: String::from("00001"),
+                enforcement_date: String::from("20240101"),
+                department_name: String::from("법무부"),
+                ..LawMetadata::default()
+            },
+            articles: vec![Article {
+                number: String::from("1"),
+                branch_number: String::new(),
+                kind: String::new(),
+                title: String::new(),
+                content: String::from("제1조 [별표 3](일반직등)을 적용한다."),
+                paragraphs: Vec::new(),
+            }],
+            addenda: Vec::new(),
+            attachments: Vec::new(),
+        };
+
+        let markdown = String::from_utf8(law_to_markdown(&detail).unwrap()).unwrap();
+
+        assert!(markdown.contains("\\[별표 3](일반직등)"));
     }
 
     #[test]

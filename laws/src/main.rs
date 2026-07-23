@@ -728,6 +728,42 @@ mod tests {
         fs::write(detail_dir.join(format!("{mst}.xml")), xml).unwrap();
     }
 
+    fn write_jemulpo_xml(
+        detail_dir: &Path,
+        mst: &str,
+        promulgation_date: &str,
+        promulgation_number: &str,
+        amendment: &str,
+        article_text: &str,
+    ) {
+        let xml = format!(
+            r#"<?xml version="1.0" encoding="UTF-8"?>
+<법령>
+  <기본정보>
+    <법령ID>014604</법령ID>
+    <공포일자>{promulgation_date}</공포일자>
+    <공포번호>{promulgation_number}</공포번호>
+    <법종구분>법률</법종구분>
+    <법종구분코드>010101</법종구분코드>
+    <법령명_한글><![CDATA[인천광역시 제물포구ㆍ영종구 및 검단구 설치 등에 관한 법률]]></법령명_한글>
+    <시행일자>20260701</시행일자>
+    <제개정구분명>{amendment}</제개정구분명>
+    <법령분류명>지방행정</법령분류명>
+    <연락부서><부서단위><소관부처명>행정안전부</소관부처명></부서단위></연락부서>
+  </기본정보>
+  <조문>
+    <조문단위>
+      <조문번호>1</조문번호>
+      <조문제목><![CDATA[목적]]></조문제목>
+      <조문내용><![CDATA[{article_text}]]></조문내용>
+    </조문단위>
+  </조문>
+</법령>
+"#
+        );
+        write_sample_xml(detail_dir, mst, &xml);
+    }
+
     #[test]
     fn plan_entries_sorts_and_assigns_paths() {
         let temp = TempDir::new().unwrap();
@@ -940,6 +976,73 @@ mod tests {
         let contributor_time = git_stdout(&output, ["show", "-s", "--format=%at %ai", commits[1]]);
         let readme_time = git_stdout(&output, ["show", "-s", "--format=%at %ai", commits[0]]);
         assert_eq!(contributor_time.trim(), readme_time.trim());
+    }
+
+    #[test]
+    fn end_to_end_includes_jemulpo_lineage_missing_from_incremental_repo() {
+        let temp = TempDir::new().unwrap();
+        let cache_dir = temp.path().join(".cache");
+        let detail_dir = cache_dir.join("detail");
+        let history_dir = cache_dir.join("history");
+        fs::create_dir_all(&detail_dir).unwrap();
+        fs::create_dir_all(&history_dir).unwrap();
+        write_jemulpo_xml(
+            &detail_dir,
+            "259479",
+            "20240130",
+            "20161",
+            "제정",
+            "제1조 (목적) 이 법은 인천광역시 제물포구ㆍ영종구 및 검단구를 설치한다.",
+        );
+        write_jemulpo_xml(
+            &detail_dir,
+            "281877",
+            "20251230",
+            "21247",
+            "일부개정",
+            "제1조 (목적) 이 법은 인천광역시 제물포구ㆍ영종구 및 검단구 설치를 정비한다.",
+        );
+        fs::write(
+            history_dir.join("인천광역시 제물포구ㆍ영종구 및 검단구 설치 등에 관한 법률.json"),
+            r#"[{"법령일련번호":"259479","법령명한글":"인천광역시 제물포구ㆍ영종구 및 검단구 설치 등에 관한 법률","제개정구분명":"제정","법령구분":"법률","공포일자":"20240130","공포번호":"20161"},{"법령일련번호":"281877","법령명한글":"인천광역시 제물포구ㆍ영종구 및 검단구 설치 등에 관한 법률","제개정구분명":"일부개정","법령구분":"법률","공포일자":"20251230","공포번호":"21247"}]"#,
+        )
+        .unwrap();
+
+        let output = temp.path().join("output.git");
+        run(Cli {
+            cache_dir,
+            output: output.clone(),
+            validate: false,
+            on_anomaly: OnAnomaly::Warn,
+            strict: false,
+            expect_laws: None,
+            manifest: None,
+        })
+        .unwrap();
+
+        let initial_commit = git_stdout(&output, ["rev-list", "--max-parents=0", "HEAD"]);
+        assert_eq!(initial_commit.lines().count(), 1);
+        let mst_259479 = git_stdout(
+            &output,
+            ["log", "--all", "--format=%H", "--grep=법령MST: 259479"],
+        );
+        assert_eq!(mst_259479.lines().count(), 1);
+        let mst_281877 = git_stdout(
+            &output,
+            ["log", "--all", "--format=%H", "--grep=법령MST: 281877"],
+        );
+        assert_eq!(mst_281877.lines().count(), 1);
+
+        let latest = git_stdout(
+            &output,
+            [
+                "show",
+                "HEAD:kr/인천광역시제물포구ㆍ영종구및검단구설치등에관한법률/법률.md",
+            ],
+        );
+        assert!(latest.contains("법령MST: 281877"));
+        assert!(latest.contains("법령ID: '014604'"));
+        assert!(latest.contains("# 인천광역시 제물포구ㆍ영종구 및 검단구 설치 등에 관한 법률"));
     }
 
     fn git_stdout<const N: usize>(repo: &Path, args: [&str; N]) -> String {

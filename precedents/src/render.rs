@@ -12,7 +12,7 @@ use unicode_normalization::UnicodeNormalization;
 use crate::xml_parser::{
     MISSING_COURT_SENTINEL, MISSING_DATE_SENTINEL, PrecedentDetail, PrecedentMetadata,
 };
-use git_writer::RepoPathBuf;
+use git_writer::{RepoPathBuf, escape_accidental_markdown_links};
 
 /// Slot separator for the composite filename grammar `{COURT}{SEP}{DATE}{SEP}{CASENO}`.
 ///
@@ -317,7 +317,7 @@ pub fn normalize_case_name(text: &str) -> String {
     let stripped = html_tag_re().replace_all(&with_spaces, "").into_owned();
     let decoded = decode_html_entities(&stripped);
     let spaced = multi_space_re().replace_all(&decoded, " ").into_owned();
-    spaced.trim().to_owned()
+    escape_accidental_markdown_links(spaced.trim())
 }
 
 /// Converts an HTML-bearing precedent section into plain Markdown text.
@@ -327,7 +327,7 @@ pub fn html_to_markdown(html: &str) -> String {
     let decoded = decode_html_entities(&stripped);
     let collapsed = multi_blank_re().replace_all(&decoded, "\n\n").into_owned();
     let spaced = multi_space_re().replace_all(&collapsed, " ").into_owned();
-    spaced.trim().to_owned()
+    escape_accidental_markdown_links(spaced.trim())
 }
 
 /// Converts a `YYYYMMDD` 선고일자 to `YYYY-MM-DD`, returning `None` for sentinel values.
@@ -736,6 +736,22 @@ mod tests {
     #[test]
     fn nbsp_decoded_then_space_collapsed() {
         assert_eq!(html_to_markdown("a&nbsp;&nbsp;&nbsp;b"), "a b");
+    }
+
+    #[test]
+    fn html_to_markdown_escapes_accidental_markdown_links() {
+        assert_eq!(
+            html_to_markdown("[별표 3](생략)을 참조"),
+            "\\[별표 3](생략)을 참조"
+        );
+    }
+
+    #[test]
+    fn normalize_case_name_escapes_accidental_markdown_links() {
+        assert_eq!(
+            normalize_case_name("[별표 3](생략) 사건"),
+            "\\[별표 3](생략) 사건"
+        );
     }
 
     #[test]
