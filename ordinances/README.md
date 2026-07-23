@@ -52,10 +52,15 @@ ordinance-kr-compiler ../.cache/ordinance --tree -o ./ordinance-tree
    - **개편 전 표기**: law.go.kr은 개편 전 발령기관을 `(구)전라남도`처럼
      표기합니다. 선두 `(구)` 접두를 떼고 옛 명칭으로 해석합니다.
 
-   같은 규칙이 `legalize-pipeline`의 `ordinances/jurisdictions.py`에도 있습니다.
+   `legalize-pipeline`의 `ordinances/jurisdictions.py`가 같은 일을 하며,
    **두 구현이 어긋나면 같은 자치법규가 서로 다른 정본 경로에 놓이므로 반드시
-   함께 고칩니다.** `(구)` 제거는 Python 정규식 `^\s*\(\s*구\s*\)\s*`와 동일하게
-   동작해야 하며, `resolves_merged_and_former_jurisdictions` 테스트가 이를 검증합니다.
+   함께 고칩니다.** 일치시켜야 할 것은 세 가지입니다.
+   - `GWANGYEOK` 목록 (Python의 동명 집합)
+   - 한자·구명칭 별칭 (Python의 `HANJA_ALIAS`) — 예) `서울特別市`
+   - `(구)` 제거 규칙 (Python 정규식 `^\s*\(\s*구\s*\)\s*`)
+
+   `resolves_merged_and_former_jurisdictions`와 `applies_every_python_hanja_alias`
+   테스트가 이를 검증합니다.
 3. 경로 충돌 규칙을 적용해 출력 파일 경로를 확정합니다.
    - 기본 경로: `{광역}/{기초 또는 _본청 또는 _교육청}/{자치법규종류}/{자치법규명}/본문.md`
    - 충돌 시: 자치법규명에 `공포번호`, `자치법규ID` 또는 두 값을 조합한

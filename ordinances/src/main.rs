@@ -799,7 +799,11 @@ fn split_jurisdiction(raw: &str) -> Result<(String, String)> {
         "전남광주통합특별시",
     ];
     let normalized = nfc(raw);
+    // Alias table must stay identical to HANJA_ALIAS in
+    // legalize-pipeline/ordinances/jurisdictions.py — a missing entry sends the
+    // same ordinance to `_미상/` here while Python files it correctly.
     let text = strip_former_marker(&normalized)
+        .replace("서울特別市", "서울특별시")
         .replace("제주도교육청", "제주특별자치도교육청")
         .replace("강원도", "강원특별자치도")
         .replace("전라북도", "전북특별자치도")
@@ -1178,6 +1182,37 @@ mod tests {
         assert_eq!(
             split_jurisdiction("충청광역연합").unwrap(),
             ("충청광역연합".to_string(), "_본청".to_string())
+        );
+    }
+
+    /// HANJA_ALIAS 전 항목이 Python 구현과 동일해야 한다.
+    /// 하나라도 빠지면 같은 자치법규가 여기서는 `_미상/` 으로, Python 에서는
+    /// 정상 경로로 가서 두 산출물이 갈린다.
+    #[test]
+    fn applies_every_python_hanja_alias() {
+        assert_eq!(
+            split_jurisdiction("서울特別市").unwrap(),
+            ("서울특별시".to_string(), "_본청".to_string())
+        );
+        assert_eq!(
+            split_jurisdiction("서울特別市 강남구").unwrap(),
+            ("서울특별시".to_string(), "강남구".to_string())
+        );
+        assert_eq!(
+            split_jurisdiction("강원도 춘천시").unwrap(),
+            ("강원특별자치도".to_string(), "춘천시".to_string())
+        );
+        assert_eq!(
+            split_jurisdiction("전라북도 전주시").unwrap(),
+            ("전북특별자치도".to_string(), "전주시".to_string())
+        );
+        assert_eq!(
+            split_jurisdiction("제주도교육청").unwrap(),
+            ("제주특별자치도".to_string(), "_교육청".to_string())
+        );
+        assert_eq!(
+            split_jurisdiction("제주도 서귀포시").unwrap(),
+            ("제주특별자치도".to_string(), "서귀포시".to_string())
         );
     }
 
