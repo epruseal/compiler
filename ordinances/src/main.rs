@@ -754,9 +754,30 @@ fn is_windows_reserved_path_part(value: &str) -> bool {
     )
 }
 
+/// Strip a leading `(구)` marker, matching `^\s*\(\s*구\s*\)\s*` in
+/// `legalize-pipeline/ordinances/jurisdictions.py`.
+///
+/// law.go.kr marks pre-reorganisation issuers this way (e.g. `(구)전라남도`
+/// after the 전남·광주 merger); those ordinances belong to the old entity.
+/// Must stay byte-for-byte equivalent to the Python side — a divergence puts
+/// the same ordinance at different canonical paths in the two implementations.
+fn strip_former_marker(text: &str) -> &str {
+    let rest = text.trim_start();
+    let Some(rest) = rest.strip_prefix('(') else {
+        return text;
+    };
+    let Some(rest) = rest.trim_start().strip_prefix('구') else {
+        return text;
+    };
+    let Some(rest) = rest.trim_start().strip_prefix(')') else {
+        return text;
+    };
+    rest.trim_start()
+}
+
 /// Split jurisdiction into `(광역, 기초)`.
 fn split_jurisdiction(raw: &str) -> Result<(String, String)> {
-    const GWANGYEOK: [&str; 18] = [
+    const GWANGYEOK: [&str; 19] = [
         "서울특별시",
         "부산광역시",
         "대구광역시",
@@ -775,8 +796,10 @@ fn split_jurisdiction(raw: &str) -> Result<(String, String)> {
         "경상남도",
         "경기도",
         "충청광역연합",
+        "전남광주통합특별시",
     ];
-    let text = nfc(raw)
+    let normalized = nfc(raw);
+    let text = strip_former_marker(&normalized)
         .replace("제주도교육청", "제주특별자치도교육청")
         .replace("강원도", "강원특별자치도")
         .replace("전라북도", "전북특별자치도")
@@ -1108,6 +1131,53 @@ mod tests {
         assert_eq!(
             split_jurisdiction("제주도 제주시").unwrap(),
             ("제주특별자치도".to_string(), "제주시".to_string())
+        );
+    }
+
+    #[test]
+    fn resolves_merged_and_former_jurisdictions() {
+        // 전남·광주 통합으로 신설된 광역 단위
+        assert_eq!(
+            split_jurisdiction("전남광주통합특별시 서구").unwrap(),
+            ("전남광주통합특별시".to_string(), "서구".to_string())
+        );
+        assert_eq!(
+            split_jurisdiction("전남광주통합특별시").unwrap(),
+            ("전남광주통합특별시".to_string(), "_본청".to_string())
+        );
+        assert_eq!(
+            split_jurisdiction("전남광주통합특별시교육청").unwrap(),
+            ("전남광주통합특별시".to_string(), "_교육청".to_string())
+        );
+
+        // 개편 전 발령기관은 '(구)' 접두를 떼고 옛 명칭으로 해석한다
+        assert_eq!(
+            split_jurisdiction("(구)전라남도").unwrap(),
+            ("전라남도".to_string(), "_본청".to_string())
+        );
+        assert_eq!(
+            split_jurisdiction("(구)광주광역시교육청").unwrap(),
+            ("광주광역시".to_string(), "_교육청".to_string())
+        );
+        assert_eq!(
+            split_jurisdiction(" ( 구 ) 전라남도 여수시").unwrap(),
+            ("전라남도".to_string(), "여수시".to_string())
+        );
+
+        // 이름 중간의 '(구)'는 건드리지 않는다
+        assert_eq!(
+            split_jurisdiction("광주광역시 동구(구)").unwrap(),
+            ("광주광역시".to_string(), "동구(구)".to_string())
+        );
+
+        // 기존 지자체 무회귀
+        assert_eq!(
+            split_jurisdiction("광주광역시 동구").unwrap(),
+            ("광주광역시".to_string(), "동구".to_string())
+        );
+        assert_eq!(
+            split_jurisdiction("충청광역연합").unwrap(),
+            ("충청광역연합".to_string(), "_본청".to_string())
         );
     }
 
