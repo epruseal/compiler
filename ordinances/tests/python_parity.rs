@@ -112,7 +112,12 @@ fn fixture_matches_python_pipeline_converter() {
     assert!(status.success());
 
     let (expected_path, expected_markdown) = python_reference(SAMPLE_XML);
-    assert!(expected_path.starts_with("_미상/(구)전라남도교육청/"));
+    // 픽스처의 발령기관은 '(구)전라남도교육청' 이다. 개편 전 표기이므로 옛 명칭으로
+    // 해석되어야 하며, '_미상/' 으로 떨어지면 한 기관의 자치법규가 두 갈래로 갈린다.
+    assert!(
+        expected_path.starts_with("전라남도/_교육청/"),
+        "expected former-marker jurisdiction to resolve, got {expected_path}"
+    );
     let actual_path = output_dir.join(Path::new(&expected_path));
     let actual_markdown = fs::read_to_string(&actual_path)
         .unwrap_or_else(|err| panic!("read {}: {err}", actual_path.display()));

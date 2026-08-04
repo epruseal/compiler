@@ -951,6 +951,28 @@ fn is_windows_reserved_path_part(value: &str) -> bool {
 }
 
 /// Split jurisdiction into `(광역, 기초)`.
+/// Strip a leading `(구)` marker, matching `^\s*\(\s*구\s*\)\s*` in
+/// `legalize-pipeline/ordinances/jurisdictions.py`.
+///
+/// law.go.kr marks pre-reorganisation issuers this way (e.g. `(구)전라남도`
+/// after the 전남·광주 merger); those ordinances belong to the old entity.
+/// Without this they fall into `_미상/`, splitting one issuer across two roots.
+/// Must stay equivalent to the Python side — a divergence puts the same
+/// ordinance at different canonical paths in the two implementations.
+fn strip_former_marker(text: &str) -> &str {
+    let rest = text.trim_start();
+    let Some(rest) = rest.strip_prefix('(') else {
+        return text;
+    };
+    let Some(rest) = rest.trim_start().strip_prefix('구') else {
+        return text;
+    };
+    let Some(rest) = rest.trim_start().strip_prefix(')') else {
+        return text;
+    };
+    rest.trim_start()
+}
+
 fn split_jurisdiction(raw: &str) -> Result<(String, String)> {
     const GWANGYEOK: [&str; 19] = [
         "서울특별시",
@@ -973,7 +995,12 @@ fn split_jurisdiction(raw: &str) -> Result<(String, String)> {
         "경기도",
         "충청광역연합",
     ];
-    let text = nfc(raw)
+    // Alias table must stay identical to HANJA_ALIAS in
+    // legalize-pipeline/ordinances/jurisdictions.py — a missing entry sends the
+    // same ordinance to `_미상/` here while Python files it correctly.
+    let normalized = nfc(raw);
+    let text = strip_former_marker(&normalized)
+        .replace("서울特別市", "서울특별시")
         .replace("제주도교육청", "제주특별자치도교육청")
         .replace("강원도", "강원특별자치도")
         .replace("전라북도", "전북특별자치도")
@@ -1465,6 +1492,48 @@ mod tests {
         assert_eq!(
             split_jurisdiction("전남광주통합특별시교육청").unwrap(),
             ("전남광주통합특별시".to_string(), "_교육청".to_string())
+        );
+    }
+
+    /// 개편 전 발령기관 표기는 옛 명칭으로 해석해야 한다.
+    /// 떼지 않으면 `_미상/` 으로 떨어져 한 기관의 자치법규가 두 갈래로 갈린다.
+    #[test]
+    fn resolves_former_jurisdiction_marker() {
+        assert_eq!(
+            split_jurisdiction("(구)전라남도").unwrap(),
+            ("전라남도".to_string(), "_본청".to_string())
+        );
+        assert_eq!(
+            split_jurisdiction("(구)광주광역시교육청").unwrap(),
+            ("광주광역시".to_string(), "_교육청".to_string())
+        );
+        assert_eq!(
+            split_jurisdiction(" ( 구 ) 전라남도 여수시").unwrap(),
+            ("전라남도".to_string(), "여수시".to_string())
+        );
+        // 이름 중간의 '(구)' 는 건드리지 않는다
+        assert_eq!(
+            split_jurisdiction("광주광역시 동구(구)").unwrap(),
+            ("광주광역시".to_string(), "동구(구)".to_string())
+        );
+    }
+
+    /// HANJA_ALIAS 전 항목이 Python 구현과 동일해야 한다.
+    /// 하나라도 빠지면 같은 자치법규가 여기서는 `_미상/` 으로, Python 에서는
+    /// 정상 경로로 가서 두 산출물이 갈린다.
+    #[test]
+    fn applies_every_python_hanja_alias() {
+        assert_eq!(
+            split_jurisdiction("서울特別市").unwrap(),
+            ("서울특별시".to_string(), "_본청".to_string())
+        );
+        assert_eq!(
+            split_jurisdiction("서울特別市 강남구").unwrap(),
+            ("서울특별시".to_string(), "강남구".to_string())
+        );
+        assert_eq!(
+            split_jurisdiction("제주도교육청").unwrap(),
+            ("제주특별자치도".to_string(), "_교육청".to_string())
         );
     }
 

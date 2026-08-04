@@ -19,7 +19,7 @@ jobs:
           # Pinned to a reviewed legalize-pipeline commit so this build is
           # reproducible: bumping requires re-running parity tests against the
           # new SHA in a follow-up PR. Do not move this back to a moving ref.
-          ref: 105133a55f759b68d98dda31696f65dc36753dbc
+          ref: bc4dcda758039f67e3c2dab791c257ae84b5f054
           persist-credentials: false
       - run: python3 -m pip install -r legalize-pipeline/requirements.txt
       - run: >
