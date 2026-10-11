@@ -1,6 +1,6 @@
 //! Compile cached law.go.kr ordinance XML into a bare Git repository.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -675,6 +675,17 @@ fn collect_articles(raw: &[u8]) -> Result<Vec<Article>> {
             }
             Event::Eof => break,
             _ => {}
+        }
+    }
+    let mut seen = BTreeSet::new();
+    for article in &articles {
+        if article.kind != "전문" && !article.no.is_empty() && article.no != "0" {
+            anyhow::ensure!(
+                seen.insert((&article.no, &article.branch_no)),
+                "duplicate ordinance article {} {}",
+                article.no,
+                article.branch_no
+            );
         }
     }
     Ok(articles)
