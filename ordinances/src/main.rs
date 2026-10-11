@@ -292,20 +292,11 @@ fn render_ordinance_entries(cache_dir: &Path, limit: Option<usize>) -> Result<Ve
     let mut skipped = 0usize;
     for path in files {
         let raw = fs::read(&path).with_context(|| format!("failed to read {}", path.display()))?;
-        let ordinance = match parse_ordinance(
+        let ordinance = parse_ordinance(
             &raw,
             path.file_stem().and_then(|s| s.to_str()).unwrap_or(""),
-        ) {
-            Ok(ordinance) => ordinance,
-            Err(err) => {
-                skipped += 1;
-                eprintln!(
-                    "skipping unparsable ordinance XML {}: {err:#}",
-                    path.display()
-                );
-                continue;
-            }
-        };
+        )
+        .with_context(|| format!("failed to parse ordinance XML {}", path.display()))?;
         if !matches!(
             ordinance.ordinance_type.as_str(),
             "조례" | "규칙" | "훈령" | "예규" | "고시" | "의회규칙"
@@ -454,9 +445,9 @@ fn commit_timestamp(raw: &str) -> Result<i64> {
 
 /// Compile every XML file under `cache_dir`.
 fn compile_dir(cache_dir: &Path, output: &Path, limit: Option<usize>) -> Result<()> {
+    let entries = render_ordinance_entries(cache_dir, limit)?;
     fs::create_dir_all(output).with_context(|| format!("failed to create {}", output.display()))?;
     fs::write(output.join("README.md"), REPOSITORY_README)?;
-    let entries = render_ordinance_entries(cache_dir, limit)?;
     for entry in &entries {
         if entry.delete_only {
             if let Some(previous_path) = &entry.previous_path {
@@ -541,23 +532,43 @@ fn tag_texts(raw: &[u8]) -> Result<BTreeMap<String, Vec<String>>> {
     reader.config_mut().trim_text(false);
     let mut stack: Vec<(String, String)> = Vec::new();
     let mut fields: BTreeMap<String, Vec<String>> = BTreeMap::new();
+    let mut root_seen = false;
     loop {
         match reader.read_event()? {
-            Event::Start(event) => stack.push((
-                String::from_utf8_lossy(event.name().as_ref()).to_string(),
-                String::new(),
-            )),
+            Event::Start(event) => {
+                if stack.is_empty() {
+                    anyhow::ensure!(!root_seen, "multiple XML roots");
+                    root_seen = true;
+                }
+                stack.push((
+                    String::from_utf8_lossy(event.name().as_ref()).to_string(),
+                    String::new(),
+                ));
+            }
+            Event::Empty(_) if stack.is_empty() => {
+                anyhow::ensure!(!root_seen, "multiple XML roots");
+                root_seen = true;
+            }
             Event::Text(text) => {
                 if let Some((_, value)) = stack.last_mut() {
                     value.push_str(&text.decode()?);
+                } else {
+                    anyhow::ensure!(
+                        text.as_ref()
+                            .iter()
+                            .all(|b| matches!(b, b' ' | b'\t' | b'\r' | b'\n')),
+                        "text outside XML root"
+                    );
                 }
             }
             Event::CData(text) => {
+                anyhow::ensure!(!stack.is_empty(), "CDATA outside XML root");
                 if let Some((_, value)) = stack.last_mut() {
                     value.push_str(&text.decode()?);
                 }
             }
             Event::GeneralRef(reference) => {
+                anyhow::ensure!(!stack.is_empty(), "reference outside XML root");
                 if let Some((_, value)) = stack.last_mut() {
                     let reference = reference.decode()?;
                     let encoded = format!("&{reference};");
@@ -571,7 +582,10 @@ fn tag_texts(raw: &[u8]) -> Result<BTreeMap<String, Vec<String>>> {
                     fields.entry(name).or_default().push(value);
                 }
             }
-            Event::Eof => break,
+            Event::Eof => {
+                anyhow::ensure!(root_seen && stack.is_empty(), "incomplete XML document");
+                break;
+            }
             _ => {}
         }
     }
@@ -1914,7 +1928,7 @@ mod tests {
     }
 
     #[test]
-    fn bare_repo_skips_unparsable_xml_without_aborting_valid_entries() {
+    fn bare_repo_rejects_unparsable_xml_before_writing_valid_entries() {
         let temp = tempfile::tempdir().unwrap();
         let cache = temp.path().join("cache");
         fs::create_dir(&cache).unwrap();
@@ -1926,9 +1940,9 @@ mod tests {
         .unwrap();
         let repo = temp.path().join("out.git");
 
-        compile_bare_repo(&cache, &repo, None).unwrap();
-        git_ok(&repo, ["fsck", "--full"]);
-        assert_eq!(git_stdout(&repo, ["rev-list", "--count", "--all"]), "2");
+        let error = compile_bare_repo(&cache, &repo, None).unwrap_err();
+        assert!(error.to_string().contains("failed to parse ordinance XML"));
+        assert!(!repo.exists());
     }
 
     #[test]
@@ -1942,7 +1956,7 @@ mod tests {
         fs::write(repo.join("marker"), "keep").unwrap();
 
         let error = compile_bare_repo(&cache, &repo, None).unwrap_err();
-        assert!(error.to_string().contains("no valid ordinance XML"));
+        assert!(error.to_string().contains("failed to parse ordinance XML"));
         assert_eq!(fs::read_to_string(repo.join("marker")).unwrap(), "keep");
     }
 

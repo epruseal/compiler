@@ -232,3 +232,63 @@ fn pipeline_dir() -> Option<PathBuf> {
         .into_iter()
         .find(|path| path.join("ordinances").is_dir())
 }
+
+#[test]
+fn malformed_cache_fails_all_compiler_modes() {
+    let temp = tempfile::tempdir().unwrap();
+    let cache = temp.path().join("cache");
+    fs::create_dir(&cache).unwrap();
+    fs::write(cache.join("12345.xml"), SAMPLE_XML).unwrap();
+    fs::write(cache.join("bad.xml"), "<Ordin><").unwrap();
+    for mode in [None, Some("--tree"), Some("--validate")] {
+        let output = temp.path().join("rust-output");
+        let mut command = Command::new(env!("CARGO_BIN_EXE_ordinance-kr-compiler"));
+        command.arg(&cache).arg("-o").arg(&output);
+        if let Some(mode) = mode {
+            command.arg(mode);
+        }
+        let result = command.output().unwrap();
+        assert!(!result.status.success());
+        assert!(String::from_utf8_lossy(&result.stderr).contains("failed to parse ordinance XML"));
+        assert!(!output.exists());
+    }
+}
+
+#[test]
+fn incomplete_documents_fail_like_python() {
+    let pipeline = pipeline_dir().expect("legalize-pipeline checkout is required");
+    let cases = [
+        SAMPLE_XML.replace("</자치법규>", ""),
+        format!("{}<unfinished>", SAMPLE_XML.replace("</자치법규>", "")),
+        format!("{SAMPLE_XML}<extra/>"),
+        format!("<extra/>{SAMPLE_XML}"),
+        format!("{SAMPLE_XML}unexpected"),
+        format!("unexpected{SAMPLE_XML}"),
+        format!("{SAMPLE_XML}<![CDATA[ ]]>"),
+        String::new(),
+    ];
+    for xml in cases {
+        let temp = tempfile::tempdir().unwrap();
+        let cache = temp.path().join("cache");
+        fs::create_dir(&cache).unwrap();
+        let input = cache.join("12345.xml");
+        fs::write(&input, &xml).unwrap();
+        let python = Command::new(std::env::var("PYTHON").unwrap_or_else(|_| "python".into()))
+            .args(["-c", "import sys; from ordinances.converter import parse_ordinance_xml; parse_ordinance_xml(open(sys.argv[1]).read())"])
+            .arg(&input)
+            .env("PYTHONPATH", &pipeline)
+            .output().unwrap();
+        assert!(!python.status.success(), "Python accepted {xml}");
+        for mode in [None, Some("--tree"), Some("--validate")] {
+            let output = temp.path().join("output");
+            let mut command = Command::new(env!("CARGO_BIN_EXE_ordinance-kr-compiler"));
+            command.arg(&cache).arg("-o").arg(&output);
+            if let Some(mode) = mode {
+                command.arg(mode);
+            }
+            let result = command.output().unwrap();
+            assert!(!result.status.success(), "Rust accepted {xml} in {mode:?}");
+            assert!(!output.exists());
+        }
+    }
+}
