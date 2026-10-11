@@ -259,6 +259,7 @@ fn malformed_cache_fails_all_compiler_modes() {
 fn invalid_documents_fail_like_python() {
     let pipeline = pipeline_dir().expect("legalize-pipeline checkout is required");
     let cases = [
+        SAMPLE_XML.replace("제1조(목적)", "제1조 제1조\n2(목적)"),
         SAMPLE_XML.replace("</자치법규>", "<조><조문번호>000100</조문번호><조문여부>Y</조문여부><조내용>제1조제1항의 담당자</조내용></조></자치법규>"),
         SAMPLE_XML.replace("</자치법규>", ""),
         format!("{}<unfinished>", SAMPLE_XML.replace("</자치법규>", "")),

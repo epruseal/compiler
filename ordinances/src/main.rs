@@ -679,6 +679,18 @@ fn collect_articles(raw: &[u8]) -> Result<Vec<Article>> {
     }
     let mut seen = BTreeSet::new();
     for article in &articles {
+        let mut label = format!("제{}조", article.no);
+        if !article.branch_no.is_empty() {
+            label.push_str(&format!("의{}", article.branch_no));
+        }
+        if article.kind != "전문"
+            && let Some(remainder) = article.content.trim().strip_prefix(&label)
+        {
+            anyhow::ensure!(
+                !remainder.trim_start().starts_with(&label),
+                "repeated ordinance article heading {label}"
+            );
+        }
         if article.kind != "전문" && !article.no.is_empty() && article.no != "0" {
             anyhow::ensure!(
                 seen.insert((&article.no, &article.branch_no)),
