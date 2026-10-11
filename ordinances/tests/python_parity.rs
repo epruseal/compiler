@@ -1,3 +1,4 @@
+use std::collections::BTreeMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -290,5 +291,66 @@ fn incomplete_documents_fail_like_python() {
             assert!(!result.status.success(), "Rust accepted {xml} in {mode:?}");
             assert!(!output.exists());
         }
+    }
+}
+
+#[test]
+fn incremental_python_collision_matches_fresh_rust_tree() {
+    let pipeline = pipeline_dir().expect("legalize-pipeline checkout is required");
+    let temp = tempfile::tempdir().unwrap();
+    let cache = temp.path().join("cache");
+    let python_repo = temp.path().join("python");
+    let rust_tree = temp.path().join("rust");
+    fs::create_dir_all(cache.join("history")).unwrap();
+    fs::write(cache.join("history/12345.xml"), SAMPLE_XML).unwrap();
+    fs::write(
+        cache.join("history/12346.xml"),
+        SAMPLE_XML
+            .replace("2000111", "2000112")
+            .replace("12345", "12346"),
+    )
+    .unwrap();
+    let script = r#"
+import json, subprocess, sys
+from pathlib import Path
+from ordinances.import_ordinances import import_from_cache
+repo = Path(sys.argv[1])
+subprocess.run(['git', 'init', '-b', 'main', str(repo)], check=True, capture_output=True)
+for key, value in [('user.name', 'Test'), ('user.email', 'test@example.invalid')]:
+    subprocess.run(['git', '-C', str(repo), 'config', key, value], check=True)
+subprocess.run(['git', '-C', str(repo), 'commit', '--allow-empty', '-m', 'initial'], check=True, capture_output=True)
+for serial in ['12345', '12346']:
+    stats = import_from_cache(repo, commit=True, serials=[serial])
+    assert stats['committed'] == 1 and stats['errors'] == 0, stats
+print(json.dumps({str(p.relative_to(repo)): p.read_text() for p in repo.rglob('본문.md')}))
+"#;
+    let python = Command::new(std::env::var("PYTHON").unwrap_or_else(|_| "python".into()))
+        .args(["-c", script])
+        .arg(&python_repo)
+        .env("PYTHONPATH", pipeline)
+        .env("LEGALIZE_ORDINANCE_CACHE_DIR", &cache)
+        .output()
+        .unwrap();
+    assert!(
+        python.status.success(),
+        "{}",
+        String::from_utf8_lossy(&python.stderr)
+    );
+    let expected: BTreeMap<String, String> = serde_json::from_slice(&python.stdout).unwrap();
+    assert_eq!(expected.len(), 2);
+    let rust = Command::new(env!("CARGO_BIN_EXE_ordinance-kr-compiler"))
+        .arg(&cache)
+        .arg("--tree")
+        .arg("-o")
+        .arg(&rust_tree)
+        .output()
+        .unwrap();
+    assert!(
+        rust.status.success(),
+        "{}",
+        String::from_utf8_lossy(&rust.stderr)
+    );
+    for (path, markdown) in expected {
+        assert_eq!(fs::read_to_string(rust_tree.join(path)).unwrap(), markdown);
     }
 }
