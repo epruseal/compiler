@@ -1,6 +1,6 @@
 //! Compile cached law.go.kr administrative-rule XML into a bare Git repository.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
@@ -402,6 +402,8 @@ struct CurrentSnapshot {
     schema_version: u8,
     observed_on: String,
     rules: BTreeMap<String, String>,
+    #[serde(default)]
+    required_body_ids: BTreeSet<String>,
 }
 
 /// Preserve publication history, then restore the source-selected current revision.
@@ -420,6 +422,13 @@ fn append_current_snapshot(cache_dir: &Path, entries: &mut Vec<ImportEntry>) -> 
             && !snapshot.observed_on.starts_with("0000")
             && is_valid_compact_date(&snapshot.observed_on.replace('-', "")),
         "invalid snapshot date"
+    );
+    ensure!(
+        snapshot
+            .required_body_ids
+            .iter()
+            .all(|id| snapshot.rules.contains_key(id)),
+        "invalid required admrule body identities"
     );
     let timestamp = commit_timestamp(&snapshot.observed_on)?;
     let mut current = BTreeMap::new();
@@ -451,6 +460,15 @@ fn append_current_snapshot(cache_dir: &Path, entries: &mut Vec<ImportEntry>) -> 
         ensure!(
             rule.identity() == identity && &rule.serial == serial,
             "snapshot identity mismatch: {identity}/{serial}"
+        );
+        ensure!(
+            !snapshot.required_body_ids.contains(identity)
+                || !rule.body.trim().is_empty()
+                || rule
+                    .attachments
+                    .iter()
+                    .any(|attachment| attachment.kind == "원문첨부"),
+            "current admrule body regression: {identity}/{serial}"
         );
         let path = admrule_path(&rule, &mut registry)
             .to_string_lossy()
@@ -664,12 +682,15 @@ fn read_xml_files(cache_dir: &Path) -> Result<Vec<PathBuf>> {
 fn parse_admrule(raw: &[u8], fallback_serial: &str) -> Result<Admrule> {
     ensure_admrule_detail_xml(raw)?;
     let fields = tag_texts(raw)?;
-    let attachments = collect_attachments(raw)?;
+    let mut attachments = collect_attachments(raw)?;
     let serial = first(&fields, &["행정규칙일련번호", "ID"])
         .unwrap_or(fallback_serial)
         .to_string();
     let rule_type = nfc(first(&fields, &["행정규칙종류", "행정규칙종류명"]).unwrap_or(""));
     let body = collect_body(&fields, &["조문내용", "본문", "내용"]);
+    if body.trim().is_empty() {
+        collect_source_attachments(&parse_xml_tree(raw)?, &mut attachments);
+    }
     let raw_ministry = nfc(first(&fields, &["소관부처명"]).unwrap_or(""));
     let raw_parent = nfc(first(&fields, &["상위부처명"]).unwrap_or(""));
     let raw_department_org = nfc(first(&fields, &["담당부서기관명"]).unwrap_or(""));
@@ -784,6 +805,34 @@ fn collect_attachments(raw: &[u8]) -> Result<Vec<Attachment>> {
         .enumerate()
         .filter_map(|(index, node)| attachment_from_node(node, index))
         .collect())
+}
+
+fn collect_source_attachments(node: &XmlNode, out: &mut Vec<Attachment>) {
+    if node.name == "첨부파일" {
+        let mut title = String::new();
+        for child in &node.children {
+            if child.name == "첨부파일명" {
+                title = nfc(child.text.trim());
+            } else if child.name == "첨부파일링크" {
+                let link = absolute_law_url(Some(child.text.trim()));
+                if !link.is_empty() {
+                    let index = out.iter().filter(|a| a.kind == "원문첨부").count() + 1;
+                    out.push(Attachment {
+                        bylaw_no: format!("원문 {index}"),
+                        branch_no: String::new(),
+                        kind: "원문첨부".into(),
+                        title: title.clone(),
+                        file_link: link,
+                        pdf_link: String::new(),
+                    });
+                }
+                title.clear();
+            }
+        }
+    }
+    for child in &node.children {
+        collect_source_attachments(child, out);
+    }
 }
 
 fn parse_xml_tree(raw: &[u8]) -> Result<XmlNode> {
@@ -1618,12 +1667,28 @@ fn take_digits(value: &str) -> Option<(&str, &str)> {
 /// Render Markdown.
 fn render_markdown(rule: &Admrule) -> String {
     let (issue_date, epoch_clamped) = issue_date(&rule.issue_date_raw);
-    let body_source = if rule.body.trim().is_empty() {
+    let source_links: Vec<_> = rule
+        .attachments
+        .iter()
+        .filter(|attachment| attachment.kind == "원문첨부")
+        .collect();
+    let body_source = if rule.body.trim().is_empty() && !source_links.is_empty() {
+        "attachment-only"
+    } else if rule.body.trim().is_empty() {
         "parsing-failed"
     } else {
         "api-text"
     };
-    let body = if rule.body.trim().is_empty() {
+    let body = if body_source == "attachment-only" {
+        format!(
+            "본문은 다음 원문 첨부파일을 참조하세요.\n\n{}",
+            source_links
+                .iter()
+                .map(|attachment| format!("<{}>", attachment.file_link))
+                .collect::<Vec<_>>()
+                .join("\n\n")
+        )
+    } else if rule.body.trim().is_empty() {
         "본문은 국가법령정보센터 원문 또는 첨부파일을 참조하세요.".to_string()
     } else {
         escape_accidental_markdown_links(rule.body.trim())

@@ -244,6 +244,9 @@ fn invalid_snapshot_fails_before_either_compiler_writes_output() {
         serde_json::json!({"schema_version":1,"observed_on":"2026-10-09","rules":{"ABC":"123"}});
     let mut cases = vec![serde_json::json!([])];
     for (key, value) in [
+        ("required_body_ids", serde_json::json!("ABC")),
+        ("required_body_ids", serde_json::json!([123])),
+        ("required_body_ids", serde_json::json!(["WRONG"])),
         ("schema_version", serde_json::json!(2)),
         ("schema_version", serde_json::json!(true)),
         ("rules", serde_json::json!({})),
@@ -419,4 +422,99 @@ fn snapshot_path_swaps_preserve_both_identities_in_bare_repository() {
             fs::read(python_out.join(path)).unwrap()
         );
     }
+}
+
+#[test]
+fn selected_body_loss_is_rejected_by_both_compilers() {
+    let pipeline = pipeline_dir().expect("Python pipeline required");
+    let temp = tempfile::tempdir().unwrap();
+    let cache = temp.path().join("cache");
+    fs::create_dir(&cache).unwrap();
+    fs::write(
+        cache.join("123.xml"),
+        SAMPLE_XML.replace("<조문내용>제1조 목적</조문내용>", ""),
+    )
+    .unwrap();
+    fs::write(
+        cache.join("current_snapshot.json"),
+        serde_json::json!({
+            "schema_version": 1, "observed_on": "2026-10-11", "rules": {"ABC":"123"},
+            "required_body_ids": ["ABC"]
+        })
+        .to_string(),
+    )
+    .unwrap();
+    let bare = temp.path().join("out.git");
+    let rust = Command::new(env!("CARGO_BIN_EXE_admrule-kr-compiler"))
+        .arg(&cache)
+        .arg("-o")
+        .arg(&bare)
+        .output()
+        .unwrap();
+    assert!(!rust.status.success());
+    assert!(String::from_utf8_lossy(&rust.stderr).contains("body regression"));
+    assert!(!bare.exists());
+    let output = temp.path().join("python");
+    let python = Command::new(std::env::var("PYTHON").unwrap_or_else(|_| "python".into()))
+        .args(["-m", "admrules.import_admrules", "--repo"])
+        .arg(&output)
+        .env("PYTHONPATH", &pipeline)
+        .env("LEGALIZE_ADMRULE_CACHE_DIR", &cache)
+        .output()
+        .unwrap();
+    assert!(!python.status.success());
+    assert!(String::from_utf8_lossy(&python.stderr).contains("body regression"));
+    assert!(!output.exists());
+}
+
+#[test]
+fn attachment_only_source_preserves_links_and_satisfies_body_requirement() {
+    let temp = tempfile::tempdir().unwrap();
+    let cache = temp.path().join("cache");
+    fs::create_dir(&cache).unwrap();
+    let xml = SAMPLE_XML
+        .replace("<조문내용>제1조 목적</조문내용>", "")
+        .replace(
+            "</AdmRulService>",
+            r#"<첨부파일>
+<첨부파일명>원문.pdf</첨부파일명><첨부파일링크>http://law.go.kr/flDownload.do?flSeq=1</첨부파일링크>
+<첨부파일명>원문.hwpx</첨부파일명><첨부파일링크>/LSW/flDownload.do?flSeq=2</첨부파일링크>
+</첨부파일></AdmRulService>"#,
+        );
+    fs::write(cache.join("123.xml"), &xml).unwrap();
+    fs::write(
+        cache.join("current_snapshot.json"),
+        serde_json::json!({
+            "schema_version": 1, "observed_on": "2026-10-11", "rules": {"ABC":"123"},
+            "required_body_ids": ["ABC"]
+        })
+        .to_string(),
+    )
+    .unwrap();
+    let bare = temp.path().join("out.git");
+    assert!(
+        Command::new(env!("CARGO_BIN_EXE_admrule-kr-compiler"))
+            .arg(&cache)
+            .arg("-o")
+            .arg(&bare)
+            .status()
+            .unwrap()
+            .success()
+    );
+    let clone = temp.path().join("clone");
+    assert!(
+        Command::new("git")
+            .arg("clone")
+            .arg(&bare)
+            .arg(&clone)
+            .status()
+            .unwrap()
+            .success()
+    );
+    let (path, expected) = python_reference(&xml);
+    let actual = fs::read_to_string(clone.join(path)).unwrap();
+    assert_eq!(actual, expected);
+    assert!(actual.contains("본문출처: 'attachment-only'"));
+    assert!(actual.contains("<http://law.go.kr/flDownload.do?flSeq=1>"));
+    assert!(actual.contains("<https://www.law.go.kr/LSW/flDownload.do?flSeq=2>"));
 }

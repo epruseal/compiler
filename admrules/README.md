@@ -60,10 +60,14 @@ admrule-kr-compiler ../.cache/admrule --tree -o ./admrule-tree
    판본을 최종 HEAD에 복원합니다. 시행 예정판도 발령일순 이력에 보존합니다.
    복원 또는 제외 커밋은 목록 관측일을 사용합니다.
    필요한 상세 XML이 없거나 ID가 맞지 않으면 빌드를 중단합니다.
+   `required_body_ids`에 기록된 현행 규칙의 본문과 원문 첨부가 모두 없을 때도 출력 생성 전에 중단합니다.
 
 `current_snapshot.json`은 `admrules.fetch_cache`가 만드는 캐시 계약입니다.
 `schema_version: 1`, 관측일 `observed_on`, ID별 일련번호 `rules`를 포함합니다.
 목록에는 없지만 상세 API가 현행으로 확인한 자료는 `supplemental`에 근거를 남기고 보존합니다.
+`required_body_ids`는 본문 보존이 필요한 현행 ID 목록입니다. Python과 Rust가 같은 조건을 검사합니다.
+이 필드가 없는 옛 스냅샷도 읽을 수 있지만, 복구 전에는 파이프라인으로 스냅샷을 다시 생성해야 합니다.
+온라인 파이프라인은 게시 본문과 캐시가 다르면 원문을 다시 확인합니다. 오프라인 컴파일러는 API를 호출하지 않습니다.
 목록에서 사라진 과거 XML은 `retired/`에 보관하며 컴파일 대상에 포함합니다.
 동일 일련번호가 두 위치에 있으면 활성 캐시를 우선합니다.
 YAML 문자열은 길이 때문에 줄을 나누지 않습니다. 줄바꿈과 제어 문자는
@@ -106,3 +110,7 @@ cargo build --release
 
 [MIT license]: ../LICENSE-MIT
 [Apache License (Version 2.0)]: ../LICENSE-APACHE
+
+원천이 본문 대신 `첨부파일명`과 `첨부파일링크`로 제공하는 문서는 원문 첨부를 보존합니다.
+이 경우 `본문출처`는 `attachment-only`이며 Markdown 본문에도 원문 링크를 표시합니다.
+별표만 있는 경우에는 본문 보존 조건을 충족하지 않습니다.
