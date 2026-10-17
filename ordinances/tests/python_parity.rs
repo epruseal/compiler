@@ -309,6 +309,7 @@ fn invalid_documents_fail_like_python() {
     let cases = [
         fs::read_to_string(pipeline.join("tests/fixtures/ordinances/upstream-2178401.xml")).unwrap(),
         fs::read_to_string(pipeline.join("tests/fixtures/ordinances/upstream-2178653.xml")).unwrap(),
+        fs::read_to_string(pipeline.join("tests/fixtures/ordinances/upstream-2178653-20261018.xml")).unwrap(),
         SAMPLE_XML.replace("제1조(목적)", "제1조 제1조\n2(목적)"),
         SAMPLE_XML.replace("</자치법규>", "<조><조문번호>000100</조문번호><조문여부>Y</조문여부><조내용>제1조제1항의 담당자</조내용></조></자치법규>"),
         SAMPLE_XML.replace("</자치법규>", ""),
@@ -349,12 +350,16 @@ fn invalid_documents_fail_like_python() {
 #[test]
 fn reviewed_source_defects_preserve_existing_outputs_in_all_modes() {
     let pipeline = pipeline_dir().expect("legalize-pipeline checkout is required");
-    for serial in ["2178401", "2178653"] {
+    for (serial, fixture) in [
+        ("2178401", "upstream-2178401.xml"),
+        ("2178653", "upstream-2178653.xml"),
+        ("2178653", "upstream-2178653-20261018.xml"),
+    ] {
         let temp = tempfile::tempdir().unwrap();
         let cache = temp.path().join("cache");
         fs::create_dir(&cache).unwrap();
         fs::copy(
-            pipeline.join(format!("tests/fixtures/ordinances/upstream-{serial}.xml")),
+            pipeline.join(format!("tests/fixtures/ordinances/{fixture}")),
             cache.join(format!("{serial}.xml")),
         )
         .unwrap();
