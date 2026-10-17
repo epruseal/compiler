@@ -4,6 +4,10 @@
 
 [legalize-kr](https://github.com/legalize-kr/legalize-kr) (대한민국 법령 Git 저장소)의 자매 프로젝트입니다.
 
+원천의 조문 구조가 잘못된 판본은 일일 갱신에서 게시를 보류할 수 있습니다.
+검토한 판본, 원본 해시와 기한은 [파이프라인의 보류 목록](https://github.com/legalize-kr/legalize-pipeline/blob/main/ordinances/data/deferred_revisions.yaml)에 있습니다.
+보류한 판본은 반영된 최신 판본으로 간주하지 마세요. 전체 재생성은 잘못된 원본이 있으면 중단합니다.
+
 > **공지**: 자치법규 수집/변환 파이프라인이 개선될 경우, 전체 저장소를 재구성하기 위해 force-push가 실행될 수 있습니다. 이 경우 모든 commit hash가 변경됩니다. 이 저장소를 fork하거나 참조하는 경우, force-push 이후 `git fetch --all && git reset --hard origin/main`으로 동기화해 주세요.
 
 ## 빠른 시작
