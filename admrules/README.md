@@ -65,6 +65,10 @@ admrule-kr-compiler ../.cache/admrule --tree -o ./admrule-tree
 `current_snapshot.json`은 `admrules.fetch_cache`가 만드는 캐시 계약입니다.
 `schema_version: 1`, 관측일 `observed_on`, ID별 일련번호 `rules`를 포함합니다.
 목록에는 없지만 상세 API가 현행으로 확인한 자료는 `supplemental`에 근거를 남기고 보존합니다.
+If the current list omits a rule, the pipeline probes its live detail.
+An explicit no-result response adds `live_detail_no_result` to `excluded`.
+The compiler preserves that revision in publication history and omits it from HEAD according to `rules`.
+This exclusion does not establish legal repeal. The pipeline retries the detail on later runs.
 `required_body_ids`는 본문 보존이 필요한 현행 ID 목록입니다. Python과 Rust가 같은 조건을 검사합니다.
 이 필드가 없는 옛 스냅샷도 읽을 수 있지만, 복구 전에는 파이프라인으로 스냅샷을 다시 생성해야 합니다.
 온라인 파이프라인은 게시 본문과 캐시가 다르면 원문을 다시 확인합니다. 오프라인 컴파일러는 API를 호출하지 않습니다.

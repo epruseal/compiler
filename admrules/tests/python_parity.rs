@@ -165,11 +165,18 @@ fn current_snapshot_preserves_future_history_and_matches_python_import() {
     fs::create_dir(cache.join("retired")).unwrap();
     fs::write(cache.join("retired/123.xml"), &old).unwrap();
     fs::write(cache.join("124.xml"), &future).unwrap();
+    let withdrawn = old
+        .replace("123", "125")
+        .replace("ABC", "WITHDRAWN")
+        .replace("공공데이터 관리지침", "목록에서 제외된 규정")
+        .replace("</AdmRulService>", "<현행여부>Y</현행여부></AdmRulService>");
+    fs::write(cache.join("retired/125.xml"), &withdrawn).unwrap();
     for (stage, serial) in [("before", "123"), ("after", "124")] {
         fs::write(
             cache.join("current_snapshot.json"),
             serde_json::json!({
-                "schema_version": 1, "observed_on": "2026-10-09", "rules": {"ABC": serial}
+                "schema_version": 1, "observed_on": "2026-10-09", "rules": {"ABC": serial},
+                "excluded": [{"id": "WITHDRAWN", "serial": "125", "reason": "live_detail_no_result"}]
             })
             .to_string(),
         )
@@ -221,6 +228,9 @@ fn current_snapshot_preserves_future_history_and_matches_python_import() {
             );
             assert_eq!(path.contains("미래 관리지침"), stage == "after");
         }
+        let (withdrawn_path, _) = python_reference(&withdrawn);
+        assert!(!clone.join(&withdrawn_path).exists());
+        assert!(!python_out.join(&withdrawn_path).exists());
         let history = Command::new("git")
             .arg("-C")
             .arg(&clone)
@@ -230,6 +240,7 @@ fn current_snapshot_preserves_future_history_and_matches_python_import() {
         let history = String::from_utf8(history.stdout).unwrap();
         assert!(history.contains("행정규칙일련번호: 123"));
         assert!(history.contains("행정규칙일련번호: 124"));
+        assert!(history.contains("행정규칙일련번호: 125"));
     }
 }
 
