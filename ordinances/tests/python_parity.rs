@@ -183,6 +183,54 @@ fn new_integrated_jurisdiction_matches_python_pipeline_converter() {
     assert_eq!(fs::read_to_string(actual_path).unwrap(), expected_markdown);
 }
 
+#[test]
+fn current_source_annotations_match_python_in_all_modes() {
+    let pipeline = pipeline_dir().expect("legalize-pipeline checkout is required");
+    let xml = fs::read_to_string(pipeline.join("tests/fixtures/ordinances/upstream-2178831.xml"))
+        .unwrap();
+    let (expected_path, expected_markdown) = python_reference(&xml);
+    assert_eq!(expected_markdown.matches("<개정 2026.10.14.>").count(), 10);
+    assert!(expected_markdown.contains("3.<삭제 2026.10.14.>"));
+    let temp = tempfile::tempdir().unwrap();
+    let cache = temp.path().join("cache");
+    fs::create_dir(&cache).unwrap();
+    fs::write(cache.join("2178831.xml"), xml).unwrap();
+    for mode in [None, Some("--tree"), Some("--validate")] {
+        let output = temp
+            .path()
+            .join(mode.unwrap_or("bare").trim_start_matches("--"));
+        let mut command = Command::new(env!("CARGO_BIN_EXE_ordinance-kr-compiler"));
+        command.arg(&cache).arg("-o").arg(&output);
+        if let Some(mode) = mode {
+            command.arg(mode);
+        }
+        let result = command.output().unwrap();
+        assert!(
+            result.status.success(),
+            "{}",
+            String::from_utf8_lossy(&result.stderr)
+        );
+        if mode == Some("--validate") {
+            assert!(!output.exists());
+            continue;
+        }
+        let actual = if mode == Some("--tree") {
+            fs::read_to_string(output.join(&expected_path)).unwrap()
+        } else {
+            let blob = Command::new("git")
+                .arg("--git-dir")
+                .arg(&output)
+                .arg("show")
+                .arg(format!("HEAD:{expected_path}"))
+                .output()
+                .unwrap();
+            assert!(blob.status.success());
+            String::from_utf8(blob.stdout).unwrap()
+        };
+        assert_eq!(actual, expected_markdown, "mode={mode:?}");
+    }
+}
+
 fn python_reference(xml: &str) -> (String, String) {
     let pipeline = pipeline_dir().expect("legalize-pipeline checkout is required");
     let script = r#"
