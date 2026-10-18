@@ -297,6 +297,18 @@ fn render_ordinance_entries(cache_dir: &Path, limit: Option<usize>) -> Result<Ve
             path.file_stem().and_then(|s| s.to_str()).unwrap_or(""),
         )
         .with_context(|| format!("failed to parse ordinance XML {}", path.display()))?;
+        let cache_key = path.file_stem().and_then(|s| s.to_str()).unwrap_or("");
+        if path.parent() == Some(&cache_dir.join("history")) {
+            anyhow::ensure!(
+                ordinance.serial == cache_key,
+                "history cache key {cache_key} returned invalid 자치법규일련번호={}",
+                if ordinance.serial.is_empty() {
+                    "<missing>"
+                } else {
+                    &ordinance.serial
+                }
+            );
+        }
         if !matches!(
             ordinance.ordinance_type.as_str(),
             "조례" | "규칙" | "훈령" | "예규" | "고시" | "의회규칙"
@@ -304,7 +316,6 @@ fn render_ordinance_entries(cache_dir: &Path, limit: Option<usize>) -> Result<Ve
             skipped += 1;
             continue;
         }
-        let cache_key = path.file_stem().and_then(|s| s.to_str()).unwrap_or("");
         let serial_key = if ordinance.serial.is_empty() {
             format!("path:{}", path.display())
         } else {

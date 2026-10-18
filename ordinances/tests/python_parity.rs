@@ -193,8 +193,8 @@ fn current_source_annotations_match_python_in_all_modes() {
     assert!(expected_markdown.contains("3.<삭제 2026.10.14.>"));
     let temp = tempfile::tempdir().unwrap();
     let cache = temp.path().join("cache");
-    fs::create_dir(&cache).unwrap();
-    fs::write(cache.join("2178831.xml"), xml).unwrap();
+    fs::create_dir_all(cache.join("history")).unwrap();
+    fs::write(cache.join("history/2178831.xml"), xml).unwrap();
     for mode in [None, Some("--tree"), Some("--validate")] {
         let output = temp
             .path()
@@ -300,6 +300,56 @@ fn malformed_cache_fails_all_compiler_modes() {
         assert!(!result.status.success());
         assert!(String::from_utf8_lossy(&result.stderr).contains("failed to parse ordinance XML"));
         assert!(!output.exists());
+    }
+}
+
+#[test]
+fn historical_key_mismatch_preserves_outputs_like_python() {
+    let pipeline = pipeline_dir().expect("legalize-pipeline checkout is required");
+    for serial_tag in [
+        "<자치법규일련번호>99999</자치법규일련번호>",
+        "<자치법규일련번호/>",
+        "",
+    ] {
+        let temp = tempfile::tempdir().unwrap();
+        let cache = temp.path().join("cache");
+        fs::create_dir_all(cache.join("history")).unwrap();
+        let bad = SAMPLE_XML.replace("<자치법규일련번호>12345</자치법규일련번호>", serial_tag);
+        fs::write(cache.join("history/12345.xml"), bad).unwrap();
+        fs::write(cache.join("2000111.xml"), SAMPLE_XML).unwrap();
+        let output = temp.path().join("existing");
+        fs::create_dir(&output).unwrap();
+        let sentinel = output.join("published.md");
+        fs::write(&sentinel, "Existing publication").unwrap();
+        let python = Command::new(std::env::var("PYTHON").unwrap_or_else(|_| "python".into()))
+            .args(["-c", "import sys; from pathlib import Path; from ordinances.import_ordinances import import_from_cache; stats = import_from_cache(Path(sys.argv[1])); assert stats['errors'] == 1 and stats['written'] == 1, stats"])
+            .arg(temp.path().join("python"))
+            .env("PYTHONPATH", &pipeline)
+            .env("LEGALIZE_ORDINANCE_CACHE_DIR", &cache)
+            .output().unwrap();
+        assert!(
+            python.status.success(),
+            "{}",
+            String::from_utf8_lossy(&python.stderr)
+        );
+        for mode in [None, Some("--tree"), Some("--validate")] {
+            let mut command = Command::new(env!("CARGO_BIN_EXE_ordinance-kr-compiler"));
+            command.arg(&cache).arg("-o").arg(&output);
+            if let Some(mode) = mode {
+                command.arg(mode);
+            }
+            let result = command.output().unwrap();
+            assert!(
+                !result.status.success(),
+                "accepted {serial_tag} in {mode:?}"
+            );
+            assert!(String::from_utf8_lossy(&result.stderr).contains("history cache key"));
+            assert_eq!(
+                fs::read_to_string(&sentinel).unwrap(),
+                "Existing publication"
+            );
+            assert_eq!(fs::read_dir(&output).unwrap().count(), 1);
+        }
     }
 }
 
