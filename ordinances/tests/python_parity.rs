@@ -401,6 +401,10 @@ fn invalid_documents_fail_like_python() {
 fn reviewed_source_defects_preserve_existing_outputs_in_all_modes() {
     let pipeline = pipeline_dir().expect("legalize-pipeline checkout is required");
     for (serial, fixture) in [
+        ("2175357", "upstream-2175357.xml"),
+        ("2169079", "upstream-2169079.xml"),
+        ("2169057", "upstream-2169057.xml"),
+        ("2170713", "upstream-2170713.xml"),
         ("2178401", "upstream-2178401.xml"),
         ("2178653", "upstream-2178653.xml"),
         ("2178653", "upstream-2178653-20261018.xml"),
@@ -425,8 +429,11 @@ fn reviewed_source_defects_preserve_existing_outputs_in_all_modes() {
             }
             let result = command.output().unwrap();
             assert!(!result.status.success());
+            let error = String::from_utf8_lossy(&result.stderr);
             assert!(
-                String::from_utf8_lossy(&result.stderr).contains("duplicate ordinance article")
+                error.contains("duplicate ordinance article")
+                    || error.contains("repeated ordinance article heading"),
+                "{error}"
             );
             assert_eq!(
                 fs::read_to_string(&sentinel).unwrap(),
