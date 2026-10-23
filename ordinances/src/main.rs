@@ -1,6 +1,6 @@
 //! Compile cached law.go.kr ordinance XML into a bare Git repository.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -96,6 +96,8 @@ struct Ordinance {
     body: String,
     /// Parsed article-like units.
     articles: Vec<Article>,
+    source_errors: Vec<String>,
+    source_fields: Vec<(String, String)>,
     /// Addenda text blocks.
     addenda: Vec<String>,
     /// Attachment links parsed from 별표 blocks.
@@ -292,20 +294,23 @@ fn render_ordinance_entries(cache_dir: &Path, limit: Option<usize>) -> Result<Ve
     let mut skipped = 0usize;
     for path in files {
         let raw = fs::read(&path).with_context(|| format!("failed to read {}", path.display()))?;
-        let ordinance = match parse_ordinance(
+        let ordinance = parse_ordinance(
             &raw,
             path.file_stem().and_then(|s| s.to_str()).unwrap_or(""),
-        ) {
-            Ok(ordinance) => ordinance,
-            Err(err) => {
-                skipped += 1;
-                eprintln!(
-                    "skipping unparsable ordinance XML {}: {err:#}",
-                    path.display()
-                );
-                continue;
-            }
-        };
+        )
+        .with_context(|| format!("failed to parse ordinance XML {}", path.display()))?;
+        let cache_key = path.file_stem().and_then(|s| s.to_str()).unwrap_or("");
+        if path.parent() == Some(&cache_dir.join("history")) {
+            anyhow::ensure!(
+                ordinance.serial == cache_key,
+                "history cache key {cache_key} returned invalid 자치법규일련번호={}",
+                if ordinance.serial.is_empty() {
+                    "<missing>"
+                } else {
+                    &ordinance.serial
+                }
+            );
+        }
         if !matches!(
             ordinance.ordinance_type.as_str(),
             "조례" | "규칙" | "훈령" | "예규" | "고시" | "의회규칙"
@@ -313,7 +318,6 @@ fn render_ordinance_entries(cache_dir: &Path, limit: Option<usize>) -> Result<Ve
             skipped += 1;
             continue;
         }
-        let cache_key = path.file_stem().and_then(|s| s.to_str()).unwrap_or("");
         let serial_key = if ordinance.serial.is_empty() {
             format!("path:{}", path.display())
         } else {
@@ -389,14 +393,19 @@ fn assign_previous_paths(entries: &mut [ImportEntry]) {
 }
 
 fn ordinance_commit_message(ordinance: &Ordinance) -> String {
-    format!(
+    let mut message = format!(
         "{}: {} ({})\n\n자치법규ID: {}\n자치법규일련번호: {}",
         ordinance.ordinance_type,
         ordinance.name,
         ordinance.jurisdiction,
         ordinance.id,
         ordinance.serial
-    )
+    );
+    if ordinance.is_repeal() && !ordinance.source_errors.is_empty() {
+        message.push_str("\n\n");
+        message.push_str(&render_source_fields(&ordinance.source_fields));
+    }
+    message
 }
 
 fn compact_date_or_epoch(raw: &str) -> String {
@@ -454,9 +463,9 @@ fn commit_timestamp(raw: &str) -> Result<i64> {
 
 /// Compile every XML file under `cache_dir`.
 fn compile_dir(cache_dir: &Path, output: &Path, limit: Option<usize>) -> Result<()> {
+    let entries = render_ordinance_entries(cache_dir, limit)?;
     fs::create_dir_all(output).with_context(|| format!("failed to create {}", output.display()))?;
     fs::write(output.join("README.md"), REPOSITORY_README)?;
-    let entries = render_ordinance_entries(cache_dir, limit)?;
     for entry in &entries {
         if entry.delete_only {
             if let Some(previous_path) = &entry.previous_path {
@@ -512,6 +521,13 @@ fn parse_ordinance(raw: &[u8], fallback_id: &str) -> Result<Ordinance> {
         .unwrap_or(fallback_id)
         .to_string();
     let attachments = collect_attachments(raw)?;
+    let articles = collect_articles(raw)?;
+    let source_errors = article_errors(&articles);
+    let source_fields = if source_errors.is_empty() {
+        Vec::new()
+    } else {
+        collect_source_fields(raw)?
+    };
     Ok(Ordinance {
         id,
         serial: first(&fields, &["자치법규일련번호"])
@@ -529,7 +545,9 @@ fn parse_ordinance(raw: &[u8], fallback_id: &str) -> Result<Ordinance> {
         field: text_value(first(&fields, &["자치법규분야명"]).unwrap_or("")),
         department: text_value(first(&fields, &["담당부서명"]).unwrap_or("")),
         body: collect_body(&fields, &["조문내용", "조내용", "본문", "내용"]),
-        articles: collect_articles(raw)?,
+        articles,
+        source_errors,
+        source_fields,
         addenda: fields.get("부칙내용").cloned().unwrap_or_default(),
         attachments,
     })
@@ -541,23 +559,43 @@ fn tag_texts(raw: &[u8]) -> Result<BTreeMap<String, Vec<String>>> {
     reader.config_mut().trim_text(false);
     let mut stack: Vec<(String, String)> = Vec::new();
     let mut fields: BTreeMap<String, Vec<String>> = BTreeMap::new();
+    let mut root_seen = false;
     loop {
         match reader.read_event()? {
-            Event::Start(event) => stack.push((
-                String::from_utf8_lossy(event.name().as_ref()).to_string(),
-                String::new(),
-            )),
+            Event::Start(event) => {
+                if stack.is_empty() {
+                    anyhow::ensure!(!root_seen, "multiple XML roots");
+                    root_seen = true;
+                }
+                stack.push((
+                    String::from_utf8_lossy(event.name().as_ref()).to_string(),
+                    String::new(),
+                ));
+            }
+            Event::Empty(_) if stack.is_empty() => {
+                anyhow::ensure!(!root_seen, "multiple XML roots");
+                root_seen = true;
+            }
             Event::Text(text) => {
                 if let Some((_, value)) = stack.last_mut() {
                     value.push_str(&text.decode()?);
+                } else {
+                    anyhow::ensure!(
+                        text.as_ref()
+                            .iter()
+                            .all(|b| matches!(b, b' ' | b'\t' | b'\r' | b'\n')),
+                        "text outside XML root"
+                    );
                 }
             }
             Event::CData(text) => {
+                anyhow::ensure!(!stack.is_empty(), "CDATA outside XML root");
                 if let Some((_, value)) = stack.last_mut() {
                     value.push_str(&text.decode()?);
                 }
             }
             Event::GeneralRef(reference) => {
+                anyhow::ensure!(!stack.is_empty(), "reference outside XML root");
                 if let Some((_, value)) = stack.last_mut() {
                     let reference = reference.decode()?;
                     let encoded = format!("&{reference};");
@@ -571,7 +609,10 @@ fn tag_texts(raw: &[u8]) -> Result<BTreeMap<String, Vec<String>>> {
                     fields.entry(name).or_default().push(value);
                 }
             }
-            Event::Eof => break,
+            Event::Eof => {
+                anyhow::ensure!(root_seen && stack.is_empty(), "incomplete XML document");
+                break;
+            }
             _ => {}
         }
     }
@@ -598,7 +639,7 @@ fn collect_body(fields: &BTreeMap<String, Vec<String>>, keys: &[&str]) -> String
 /// Collect article fields within each `조문단위` or `조` node.
 fn collect_articles(raw: &[u8]) -> Result<Vec<Article>> {
     let mut reader = Reader::from_reader(raw);
-    reader.config_mut().trim_text(true);
+    reader.config_mut().trim_text(false);
     let mut article_tag = String::new();
     let mut article_depth = 0usize;
     let mut fields: Option<BTreeMap<String, String>> = None;
@@ -646,7 +687,7 @@ fn collect_articles(raw: &[u8]) -> Result<Vec<Article>> {
                 let name = String::from_utf8_lossy(event.name().as_ref()).to_string();
                 if article_depth == 2 && current_field == name {
                     if let Some(article_fields) = fields.as_mut() {
-                        article_fields.insert(name.clone(), current_text.trim().to_string());
+                        article_fields.insert(name.clone(), current_text.clone());
                     }
                     current_field.clear();
                     current_text.clear();
@@ -666,6 +707,100 @@ fn collect_articles(raw: &[u8]) -> Result<Vec<Article>> {
     Ok(articles)
 }
 
+fn article_errors(articles: &[Article]) -> Vec<String> {
+    let mut errors = Vec::new();
+    let mut seen = BTreeSet::new();
+    for article in articles {
+        let mut label = format!("제{}조", article.no);
+        if !article.branch_no.is_empty() {
+            label.push_str(&format!("의{}", article.branch_no));
+        }
+        if article.kind != "전문"
+            && let Some(remainder) = article.content.trim().strip_prefix(&label)
+            && remainder.trim_start().starts_with(&label)
+        {
+            errors.push(format!("repeated ordinance article heading {label}"));
+        }
+        if article.kind != "전문"
+            && !article.no.is_empty()
+            && article.no != "0"
+            && !seen.insert((&article.no, &article.branch_no))
+        {
+            errors.push(
+                format!(
+                    "duplicate ordinance article {} {}",
+                    article.no, article.branch_no
+                )
+                .trim_end()
+                .to_string(),
+            );
+        }
+    }
+    errors
+}
+
+fn collect_source_fields(raw: &[u8]) -> Result<Vec<(String, String)>> {
+    let normalized = std::str::from_utf8(raw)?
+        .replace("\r\n", "\n")
+        .replace('\r', "\n");
+    let mut reader = Reader::from_str(&normalized);
+    reader.config_mut().trim_text(false);
+    reader.config_mut().expand_empty_elements = true;
+    let mut fields: Vec<(String, String)> = Vec::new();
+    let mut stack: Vec<Option<usize>> = Vec::new();
+    loop {
+        match reader.read_event()? {
+            Event::Start(event) => {
+                let name = String::from_utf8_lossy(event.name().as_ref()).to_string();
+                let index = if is_article_field(&name)
+                    || matches!(name.as_str(), "부칙공포일자" | "부칙공포번호" | "부칙내용")
+                {
+                    fields.push((name, String::new()));
+                    Some(fields.len() - 1)
+                } else {
+                    None
+                };
+                stack.push(index);
+            }
+            Event::End(_) => {
+                stack.pop();
+            }
+            Event::Text(text) => {
+                for index in stack.iter().flatten() {
+                    fields[*index].1.push_str(&text.decode()?);
+                }
+            }
+            Event::CData(text) => {
+                for index in stack.iter().flatten() {
+                    fields[*index].1.push_str(&text.decode()?);
+                }
+            }
+            Event::GeneralRef(reference) => {
+                let encoded = format!("&{};", reference.decode()?);
+                let decoded = quick_xml::escape::unescape(&encoded)?;
+                for index in stack.iter().flatten() {
+                    fields[*index].1.push_str(&decoded);
+                }
+            }
+            Event::Eof => break,
+            _ => {}
+        }
+    }
+    Ok(fields)
+}
+
+fn render_source_fields(fields: &[(String, String)]) -> String {
+    let mut body = String::from(
+        "> 원천 XML의 조문 구조에 오류가 있습니다. 아래는 원문 필드와 텍스트를 등장 순서대로 보존한 내용입니다. 조문 번호나 항의 소속을 수정하지 않았습니다.\n\n",
+    );
+    for (tag, text) in fields {
+        let longest = text.split(|c| c != '`').map(str::len).max().unwrap_or(0);
+        let fence = "`".repeat(3.max(longest + 1));
+        body.push_str(&format!("{tag}\n\n{fence}text\n{text}\n{fence}\n\n"));
+    }
+    body.trim_end().to_string()
+}
+
 fn is_article_field(name: &str) -> bool {
     matches!(
         name,
@@ -677,7 +812,7 @@ fn article_from_fields(fields: BTreeMap<String, String>) -> Article {
     let raw_no = article_field(&fields, &["조문번호"]);
     let raw_branch = article_field(&fields, &["조문가지번호"]);
     let (no, branch_no) = split_article_number(raw_no, raw_branch);
-    let raw_kind = article_field(&fields, &["조문여부"]);
+    let raw_kind = article_field(&fields, &["조문여부"]).trim();
     Article {
         no,
         branch_no,
@@ -1284,6 +1419,9 @@ fn render_markdown(ordinance: &Ordinance) -> String {
             body_text.push_str(&content);
         }
     }
+    if !ordinance.source_errors.is_empty() {
+        body_text = render_source_fields(&ordinance.source_fields);
+    }
     let body = if body_text.trim().is_empty() {
         "본문은 첨부파일 또는 원문을 참조하세요.".to_string()
     } else {
@@ -1314,7 +1452,12 @@ fn render_markdown(ordinance: &Ordinance) -> String {
     frontmatter.push_str("지자체구분:\n");
     frontmatter.push_str(&yaml_wrapped_mapping_value("  광역: ", "    ", &gwangyeok));
     frontmatter.push_str(&yaml_wrapped_mapping_value("  기초: ", "    ", &gicho));
-    frontmatter.push_str(&format!("공포일자: {promulgation_date}\n"));
+    let promulgation_yaml = if is_valid_compact_date(&promulgation_date.replace('-', "")) {
+        promulgation_date
+    } else {
+        yaml_string(&promulgation_date)
+    };
+    frontmatter.push_str(&format!("공포일자: {promulgation_yaml}\n"));
     for (key, value) in [
         ("공포번호", ordinance.prom_no.as_str()),
         (
@@ -1340,6 +1483,12 @@ fn render_markdown(ordinance: &Ordinance) -> String {
         "  ",
         &ordinance.prom_date_raw,
     ));
+    if !ordinance.source_errors.is_empty() {
+        frontmatter.push_str("원문오류:\n");
+        for error in &ordinance.source_errors {
+            frontmatter.push_str(&format!("  - {}\n", yaml_string(error)));
+        }
+    }
     format!("{frontmatter}---\n\n# {}\n\n{}\n", ordinance.name, body)
 }
 
@@ -1914,7 +2063,7 @@ mod tests {
     }
 
     #[test]
-    fn bare_repo_skips_unparsable_xml_without_aborting_valid_entries() {
+    fn bare_repo_rejects_unparsable_xml_before_writing_valid_entries() {
         let temp = tempfile::tempdir().unwrap();
         let cache = temp.path().join("cache");
         fs::create_dir(&cache).unwrap();
@@ -1926,9 +2075,9 @@ mod tests {
         .unwrap();
         let repo = temp.path().join("out.git");
 
-        compile_bare_repo(&cache, &repo, None).unwrap();
-        git_ok(&repo, ["fsck", "--full"]);
-        assert_eq!(git_stdout(&repo, ["rev-list", "--count", "--all"]), "2");
+        let error = compile_bare_repo(&cache, &repo, None).unwrap_err();
+        assert!(error.to_string().contains("failed to parse ordinance XML"));
+        assert!(!repo.exists());
     }
 
     #[test]
@@ -1942,7 +2091,7 @@ mod tests {
         fs::write(repo.join("marker"), "keep").unwrap();
 
         let error = compile_bare_repo(&cache, &repo, None).unwrap_err();
-        assert!(error.to_string().contains("no valid ordinance XML"));
+        assert!(error.to_string().contains("failed to parse ordinance XML"));
         assert_eq!(fs::read_to_string(repo.join("marker")).unwrap(), "keep");
     }
 

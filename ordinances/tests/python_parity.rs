@@ -1,3 +1,4 @@
+use std::collections::BTreeMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -144,6 +145,74 @@ fn fixture_matches_python_pipeline_converter() {
 }
 
 #[test]
+fn title_whitespace_and_incomplete_dates_match_python() {
+    let xml = SAMPLE_XML
+        .replace("<조제목>목적</조제목>", "<조제목> \n목적 </조제목>")
+        .replace("20210930", "2000011 ");
+    let (path, expected) = python_reference(&xml);
+    assert!(expected.contains("공포일자: '2000011 '"));
+    assert!(expected.contains("##### 제1조 ( \n목적 )"));
+    let temp = tempfile::tempdir().unwrap();
+    let cache = temp.path().join("cache");
+    fs::create_dir(&cache).unwrap();
+    fs::write(cache.join("12345.xml"), xml).unwrap();
+    let output = temp.path().join("tree");
+    let result = Command::new(env!("CARGO_BIN_EXE_ordinance-kr-compiler"))
+        .arg(&cache)
+        .arg("-o")
+        .arg(&output)
+        .arg("--tree")
+        .output()
+        .unwrap();
+    assert!(
+        result.status.success(),
+        "{}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    assert_eq!(fs::read_to_string(output.join(&path)).unwrap(), expected);
+    let pipeline = pipeline_dir().expect("legalize-pipeline checkout is required");
+    let python_repo = temp.path().join("python");
+    let python = Command::new(std::env::var("PYTHON").unwrap_or_else(|_| "python".into()))
+        .args(["-c", "import sys, subprocess; from pathlib import Path; from ordinances.import_ordinances import import_from_cache; repo=Path(sys.argv[1]); subprocess.run(['git', 'init', '-q', '-b', 'main', str(repo)], check=True); stats=import_from_cache(repo, commit=True); assert stats['committed']==1 and stats['errors']==0, stats"])
+        .arg(&python_repo).env("PYTHONPATH", &pipeline)
+        .env("LEGALIZE_ORDINANCE_CACHE_DIR", &cache).output().unwrap();
+    assert!(
+        python.status.success(),
+        "{}",
+        String::from_utf8_lossy(&python.stderr)
+    );
+    assert_eq!(
+        fs::read_to_string(python_repo.join(&path)).unwrap(),
+        expected
+    );
+    let bare = temp.path().join("rust.git");
+    let rust = Command::new(env!("CARGO_BIN_EXE_ordinance-kr-compiler"))
+        .arg(&cache)
+        .arg("-o")
+        .arg(&bare)
+        .output()
+        .unwrap();
+    assert!(
+        rust.status.success(),
+        "{}",
+        String::from_utf8_lossy(&rust.stderr)
+    );
+    for repo in [&python_repo, &bare] {
+        let date = Command::new("git")
+            .arg("-C")
+            .arg(repo)
+            .args(["log", "-1", "--format=%aI"])
+            .output()
+            .unwrap();
+        assert!(date.status.success());
+        assert_eq!(
+            String::from_utf8(date.stdout).unwrap().trim(),
+            "1970-01-01T12:00:00+09:00"
+        );
+    }
+}
+
+#[test]
 fn new_integrated_jurisdiction_matches_python_pipeline_converter() {
     let Some(pipeline) = pipeline_dir() else {
         eprintln!("skipping Python parity test: legalize-pipeline checkout not found");
@@ -180,6 +249,54 @@ fn new_integrated_jurisdiction_matches_python_pipeline_converter() {
     assert!(expected_path.starts_with("전남광주통합특별시/남구/"));
     let actual_path = output_dir.join(&expected_path);
     assert_eq!(fs::read_to_string(actual_path).unwrap(), expected_markdown);
+}
+
+#[test]
+fn current_source_annotations_match_python_in_all_modes() {
+    let pipeline = pipeline_dir().expect("legalize-pipeline checkout is required");
+    let xml = fs::read_to_string(pipeline.join("tests/fixtures/ordinances/upstream-2178831.xml"))
+        .unwrap();
+    let (expected_path, expected_markdown) = python_reference(&xml);
+    assert_eq!(expected_markdown.matches("<개정 2026.10.14.>").count(), 10);
+    assert!(expected_markdown.contains("3.<삭제 2026.10.14.>"));
+    let temp = tempfile::tempdir().unwrap();
+    let cache = temp.path().join("cache");
+    fs::create_dir_all(cache.join("history")).unwrap();
+    fs::write(cache.join("history/2178831.xml"), xml).unwrap();
+    for mode in [None, Some("--tree"), Some("--validate")] {
+        let output = temp
+            .path()
+            .join(mode.unwrap_or("bare").trim_start_matches("--"));
+        let mut command = Command::new(env!("CARGO_BIN_EXE_ordinance-kr-compiler"));
+        command.arg(&cache).arg("-o").arg(&output);
+        if let Some(mode) = mode {
+            command.arg(mode);
+        }
+        let result = command.output().unwrap();
+        assert!(
+            result.status.success(),
+            "{}",
+            String::from_utf8_lossy(&result.stderr)
+        );
+        if mode == Some("--validate") {
+            assert!(!output.exists());
+            continue;
+        }
+        let actual = if mode == Some("--tree") {
+            fs::read_to_string(output.join(&expected_path)).unwrap()
+        } else {
+            let blob = Command::new("git")
+                .arg("--git-dir")
+                .arg(&output)
+                .arg("show")
+                .arg(format!("HEAD:{expected_path}"))
+                .output()
+                .unwrap();
+            assert!(blob.status.success());
+            String::from_utf8(blob.stdout).unwrap()
+        };
+        assert_eq!(actual, expected_markdown, "mode={mode:?}");
+    }
 }
 
 fn python_reference(xml: &str) -> (String, String) {
@@ -231,4 +348,294 @@ fn pipeline_dir() -> Option<PathBuf> {
     candidates
         .into_iter()
         .find(|path| path.join("ordinances").is_dir())
+}
+
+#[test]
+fn malformed_cache_fails_all_compiler_modes() {
+    let temp = tempfile::tempdir().unwrap();
+    let cache = temp.path().join("cache");
+    fs::create_dir(&cache).unwrap();
+    fs::write(cache.join("12345.xml"), SAMPLE_XML).unwrap();
+    fs::write(cache.join("bad.xml"), "<Ordin><").unwrap();
+    for mode in [None, Some("--tree"), Some("--validate")] {
+        let output = temp.path().join("rust-output");
+        let mut command = Command::new(env!("CARGO_BIN_EXE_ordinance-kr-compiler"));
+        command.arg(&cache).arg("-o").arg(&output);
+        if let Some(mode) = mode {
+            command.arg(mode);
+        }
+        let result = command.output().unwrap();
+        assert!(!result.status.success());
+        assert!(String::from_utf8_lossy(&result.stderr).contains("failed to parse ordinance XML"));
+        assert!(!output.exists());
+    }
+}
+
+#[test]
+fn historical_key_mismatch_preserves_outputs_like_python() {
+    let pipeline = pipeline_dir().expect("legalize-pipeline checkout is required");
+    for serial_tag in [
+        "<자치법규일련번호>99999</자치법규일련번호>",
+        "<자치법규일련번호/>",
+        "",
+    ] {
+        let temp = tempfile::tempdir().unwrap();
+        let cache = temp.path().join("cache");
+        fs::create_dir_all(cache.join("history")).unwrap();
+        let bad = SAMPLE_XML.replace("<자치법규일련번호>12345</자치법규일련번호>", serial_tag);
+        fs::write(cache.join("history/12345.xml"), bad).unwrap();
+        fs::write(cache.join("2000111.xml"), SAMPLE_XML).unwrap();
+        let output = temp.path().join("existing");
+        fs::create_dir(&output).unwrap();
+        let sentinel = output.join("published.md");
+        fs::write(&sentinel, "Existing publication").unwrap();
+        let python = Command::new(std::env::var("PYTHON").unwrap_or_else(|_| "python".into()))
+            .args(["-c", "import sys; from pathlib import Path; from ordinances.import_ordinances import import_from_cache; stats = import_from_cache(Path(sys.argv[1])); assert stats['errors'] == 1 and stats['written'] == 1, stats"])
+            .arg(temp.path().join("python"))
+            .env("PYTHONPATH", &pipeline)
+            .env("LEGALIZE_ORDINANCE_CACHE_DIR", &cache)
+            .output().unwrap();
+        assert!(
+            python.status.success(),
+            "{}",
+            String::from_utf8_lossy(&python.stderr)
+        );
+        for mode in [None, Some("--tree"), Some("--validate")] {
+            let mut command = Command::new(env!("CARGO_BIN_EXE_ordinance-kr-compiler"));
+            command.arg(&cache).arg("-o").arg(&output);
+            if let Some(mode) = mode {
+                command.arg(mode);
+            }
+            let result = command.output().unwrap();
+            assert!(
+                !result.status.success(),
+                "accepted {serial_tag} in {mode:?}"
+            );
+            assert!(String::from_utf8_lossy(&result.stderr).contains("history cache key"));
+            assert_eq!(
+                fs::read_to_string(&sentinel).unwrap(),
+                "Existing publication"
+            );
+            assert_eq!(fs::read_dir(&output).unwrap().count(), 1);
+        }
+    }
+}
+
+#[test]
+fn invalid_documents_fail_like_python() {
+    let pipeline = pipeline_dir().expect("legalize-pipeline checkout is required");
+    let cases = [
+        SAMPLE_XML.replace("</자치법규>", ""),
+        format!("{}<unfinished>", SAMPLE_XML.replace("</자치법규>", "")),
+        format!("{SAMPLE_XML}<extra/>"),
+        format!("<extra/>{SAMPLE_XML}"),
+        format!("{SAMPLE_XML}unexpected"),
+        format!("unexpected{SAMPLE_XML}"),
+        format!("{SAMPLE_XML}<![CDATA[ ]]>"),
+        String::new(),
+    ];
+    for xml in cases {
+        let temp = tempfile::tempdir().unwrap();
+        let cache = temp.path().join("cache");
+        fs::create_dir(&cache).unwrap();
+        let input = cache.join("12345.xml");
+        fs::write(&input, &xml).unwrap();
+        let python = Command::new(std::env::var("PYTHON").unwrap_or_else(|_| "python".into()))
+            .args(["-c", "import sys; from ordinances.converter import parse_ordinance_xml; parse_ordinance_xml(open(sys.argv[1]).read())"])
+            .arg(&input)
+            .env("PYTHONPATH", &pipeline)
+            .output().unwrap();
+        assert!(!python.status.success(), "Python accepted {xml}");
+        for mode in [None, Some("--tree"), Some("--validate")] {
+            let output = temp.path().join("output");
+            let mut command = Command::new(env!("CARGO_BIN_EXE_ordinance-kr-compiler"));
+            command.arg(&cache).arg("-o").arg(&output);
+            if let Some(mode) = mode {
+                command.arg(mode);
+            }
+            let result = command.output().unwrap();
+            assert!(!result.status.success(), "Rust accepted {xml} in {mode:?}");
+            assert!(!output.exists());
+        }
+    }
+}
+
+#[test]
+fn source_defects_match_python_in_all_modes() {
+    let pipeline = pipeline_dir().expect("legalize-pipeline checkout is required");
+    for (serial, fixture) in [
+        ("2175357", "upstream-2175357.xml"),
+        ("2169079", "upstream-2169079.xml"),
+        ("2169057", "upstream-2169057.xml"),
+        ("2170713", "upstream-2170713.xml"),
+        ("2178401", "upstream-2178401.xml"),
+        ("2178653", "upstream-2178653.xml"),
+        ("2178653", "upstream-2178653-20261018.xml"),
+        ("2178653", "upstream-2178653-20261023.xml"),
+    ] {
+        let xml = fs::read_to_string(pipeline.join(format!("tests/fixtures/ordinances/{fixture}")))
+            .unwrap();
+        assert_source_preservation(&xml, serial);
+    }
+    let duplicate = "<조><조문번호>000100</조문번호><조문여부>Y</조문여부><조내용>  제1조 · &amp; &lt;개정&gt;\n```\n# 제목\n[참조](주소)  \n</조내용></조>";
+    assert_source_preservation(
+        &SAMPLE_XML.replace("</자치법규>", &format!("{duplicate}</자치법규>")),
+        "12345",
+    );
+    assert_source_preservation(
+        &SAMPLE_XML.replace("제1조(목적)", "제1조 제1조\n2(목적)"),
+        "12345",
+    );
+}
+
+fn assert_source_preservation(xml: &str, serial: &str) {
+    let (path, expected) = python_reference(xml);
+    assert!(expected.contains("원문오류:"));
+    let temp = tempfile::tempdir().unwrap();
+    let cache = temp.path().join("cache");
+    fs::create_dir(&cache).unwrap();
+    fs::write(cache.join(format!("{serial}.xml")), xml).unwrap();
+    for mode in [None, Some("--tree"), Some("--validate")] {
+        let output = temp
+            .path()
+            .join(mode.unwrap_or("bare").trim_start_matches("--"));
+        let mut command = Command::new(env!("CARGO_BIN_EXE_ordinance-kr-compiler"));
+        command.arg(&cache).arg("-o").arg(&output);
+        if let Some(mode) = mode {
+            command.arg(mode);
+        }
+        let result = command.output().unwrap();
+        assert!(
+            result.status.success(),
+            "{}",
+            String::from_utf8_lossy(&result.stderr)
+        );
+        if mode == Some("--validate") {
+            assert!(!output.exists());
+            continue;
+        }
+        let actual = if mode == Some("--tree") {
+            fs::read_to_string(output.join(&path)).unwrap()
+        } else {
+            let blob = Command::new("git")
+                .arg("--git-dir")
+                .arg(&output)
+                .arg("show")
+                .arg(format!("HEAD:{path}"))
+                .output()
+                .unwrap();
+            assert!(blob.status.success());
+            String::from_utf8(blob.stdout).unwrap()
+        };
+        assert_eq!(actual, expected, "serial={serial} mode={mode:?}");
+    }
+}
+
+#[test]
+fn source_defect_repeal_preserves_text_in_deletion_commit() {
+    let duplicate = "<조><조문번호>000100</조문번호><조문여부>Y</조문여부><조내용>제1조 중복 원문</조내용></조>";
+    let xml = SAMPLE_XML
+        .replace("일부개정", "폐지")
+        .replace("</자치법규>", &format!("{duplicate}</자치법규>"));
+    let (path, markdown) = python_reference(&xml);
+    let source = &markdown[markdown
+        .find("> 원천 XML의 조문 구조에 오류가 있습니다.")
+        .unwrap()..];
+    let temp = tempfile::tempdir().unwrap();
+    let cache = temp.path().join("cache");
+    fs::create_dir(&cache).unwrap();
+    fs::write(cache.join("12345.xml"), xml).unwrap();
+    let output = temp.path().join("out.git");
+    let result = Command::new(env!("CARGO_BIN_EXE_ordinance-kr-compiler"))
+        .arg(cache)
+        .arg("-o")
+        .arg(&output)
+        .output()
+        .unwrap();
+    assert!(
+        result.status.success(),
+        "{}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    let log = Command::new("git")
+        .arg("--git-dir")
+        .arg(&output)
+        .args(["log", "-1", "--format=%B"])
+        .output()
+        .unwrap();
+    assert!(log.status.success());
+    assert!(
+        String::from_utf8(log.stdout)
+            .unwrap()
+            .trim_end()
+            .ends_with(source.trim_end())
+    );
+    let tree = Command::new("git")
+        .arg("--git-dir")
+        .arg(output)
+        .args(["ls-tree", "-r", "HEAD", "--", &path])
+        .output()
+        .unwrap();
+    assert!(tree.status.success() && tree.stdout.is_empty());
+}
+
+#[test]
+fn incremental_python_collision_matches_fresh_rust_tree() {
+    let pipeline = pipeline_dir().expect("legalize-pipeline checkout is required");
+    let temp = tempfile::tempdir().unwrap();
+    let cache = temp.path().join("cache");
+    let python_repo = temp.path().join("python");
+    let rust_tree = temp.path().join("rust");
+    fs::create_dir_all(cache.join("history")).unwrap();
+    fs::write(cache.join("history/12345.xml"), SAMPLE_XML).unwrap();
+    fs::write(
+        cache.join("history/12346.xml"),
+        SAMPLE_XML
+            .replace("2000111", "2000112")
+            .replace("12345", "12346"),
+    )
+    .unwrap();
+    let script = r#"
+import json, subprocess, sys
+from pathlib import Path
+from ordinances.import_ordinances import import_from_cache
+repo = Path(sys.argv[1])
+subprocess.run(['git', 'init', '-b', 'main', str(repo)], check=True, capture_output=True)
+for key, value in [('user.name', 'Test'), ('user.email', 'test@example.invalid')]:
+    subprocess.run(['git', '-C', str(repo), 'config', key, value], check=True)
+subprocess.run(['git', '-C', str(repo), 'commit', '--allow-empty', '-m', 'initial'], check=True, capture_output=True)
+for serial in ['12345', '12346']:
+    stats = import_from_cache(repo, commit=True, serials=[serial])
+    assert stats['committed'] == 1 and stats['errors'] == 0, stats
+print(json.dumps({str(p.relative_to(repo)): p.read_text() for p in repo.rglob('본문.md')}))
+"#;
+    let python = Command::new(std::env::var("PYTHON").unwrap_or_else(|_| "python".into()))
+        .args(["-c", script])
+        .arg(&python_repo)
+        .env("PYTHONPATH", pipeline)
+        .env("LEGALIZE_ORDINANCE_CACHE_DIR", &cache)
+        .output()
+        .unwrap();
+    assert!(
+        python.status.success(),
+        "{}",
+        String::from_utf8_lossy(&python.stderr)
+    );
+    let expected: BTreeMap<String, String> = serde_json::from_slice(&python.stdout).unwrap();
+    assert_eq!(expected.len(), 2);
+    let rust = Command::new(env!("CARGO_BIN_EXE_ordinance-kr-compiler"))
+        .arg(&cache)
+        .arg("--tree")
+        .arg("-o")
+        .arg(&rust_tree)
+        .output()
+        .unwrap();
+    assert!(
+        rust.status.success(),
+        "{}",
+        String::from_utf8_lossy(&rust.stderr)
+    );
+    for (path, markdown) in expected {
+        assert_eq!(fs::read_to_string(rust_tree.join(path)).unwrap(), markdown);
+    }
 }
