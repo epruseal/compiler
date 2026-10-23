@@ -158,7 +158,7 @@ fn title_whitespace_and_incomplete_dates_match_python() {
     fs::write(cache.join("12345.xml"), xml).unwrap();
     let output = temp.path().join("tree");
     let result = Command::new(env!("CARGO_BIN_EXE_ordinance-kr-compiler"))
-        .arg(cache)
+        .arg(&cache)
         .arg("-o")
         .arg(&output)
         .arg("--tree")
@@ -169,7 +169,47 @@ fn title_whitespace_and_incomplete_dates_match_python() {
         "{}",
         String::from_utf8_lossy(&result.stderr)
     );
-    assert_eq!(fs::read_to_string(output.join(path)).unwrap(), expected);
+    assert_eq!(fs::read_to_string(output.join(&path)).unwrap(), expected);
+    let pipeline = pipeline_dir().expect("legalize-pipeline checkout is required");
+    let python_repo = temp.path().join("python");
+    let python = Command::new(std::env::var("PYTHON").unwrap_or_else(|_| "python".into()))
+        .args(["-c", "import sys, subprocess; from pathlib import Path; from ordinances.import_ordinances import import_from_cache; repo=Path(sys.argv[1]); subprocess.run(['git', 'init', '-q', '-b', 'main', str(repo)], check=True); stats=import_from_cache(repo, commit=True); assert stats['committed']==1 and stats['errors']==0, stats"])
+        .arg(&python_repo).env("PYTHONPATH", &pipeline)
+        .env("LEGALIZE_ORDINANCE_CACHE_DIR", &cache).output().unwrap();
+    assert!(
+        python.status.success(),
+        "{}",
+        String::from_utf8_lossy(&python.stderr)
+    );
+    assert_eq!(
+        fs::read_to_string(python_repo.join(&path)).unwrap(),
+        expected
+    );
+    let bare = temp.path().join("rust.git");
+    let rust = Command::new(env!("CARGO_BIN_EXE_ordinance-kr-compiler"))
+        .arg(&cache)
+        .arg("-o")
+        .arg(&bare)
+        .output()
+        .unwrap();
+    assert!(
+        rust.status.success(),
+        "{}",
+        String::from_utf8_lossy(&rust.stderr)
+    );
+    for repo in [&python_repo, &bare] {
+        let date = Command::new("git")
+            .arg("-C")
+            .arg(repo)
+            .args(["log", "-1", "--format=%aI"])
+            .output()
+            .unwrap();
+        assert!(date.status.success());
+        assert_eq!(
+            String::from_utf8(date.stdout).unwrap().trim(),
+            "1970-01-01T12:00:00+09:00"
+        );
+    }
 }
 
 #[test]
