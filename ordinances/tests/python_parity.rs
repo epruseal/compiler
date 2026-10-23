@@ -145,6 +145,34 @@ fn fixture_matches_python_pipeline_converter() {
 }
 
 #[test]
+fn title_whitespace_and_incomplete_dates_match_python() {
+    let xml = SAMPLE_XML
+        .replace("<조제목>목적</조제목>", "<조제목> \n목적 </조제목>")
+        .replace("20210930", "2000011 ");
+    let (path, expected) = python_reference(&xml);
+    assert!(expected.contains("공포일자: '2000011 '"));
+    assert!(expected.contains("##### 제1조 ( \n목적 )"));
+    let temp = tempfile::tempdir().unwrap();
+    let cache = temp.path().join("cache");
+    fs::create_dir(&cache).unwrap();
+    fs::write(cache.join("12345.xml"), xml).unwrap();
+    let output = temp.path().join("tree");
+    let result = Command::new(env!("CARGO_BIN_EXE_ordinance-kr-compiler"))
+        .arg(cache)
+        .arg("-o")
+        .arg(&output)
+        .arg("--tree")
+        .output()
+        .unwrap();
+    assert!(
+        result.status.success(),
+        "{}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    assert_eq!(fs::read_to_string(output.join(path)).unwrap(), expected);
+}
+
+#[test]
 fn new_integrated_jurisdiction_matches_python_pipeline_converter() {
     let Some(pipeline) = pipeline_dir() else {
         eprintln!("skipping Python parity test: legalize-pipeline checkout not found");
@@ -357,12 +385,6 @@ fn historical_key_mismatch_preserves_outputs_like_python() {
 fn invalid_documents_fail_like_python() {
     let pipeline = pipeline_dir().expect("legalize-pipeline checkout is required");
     let cases = [
-        fs::read_to_string(pipeline.join("tests/fixtures/ordinances/upstream-2178401.xml")).unwrap(),
-        fs::read_to_string(pipeline.join("tests/fixtures/ordinances/upstream-2178653.xml")).unwrap(),
-        fs::read_to_string(pipeline.join("tests/fixtures/ordinances/upstream-2178653-20261018.xml")).unwrap(),
-        fs::read_to_string(pipeline.join("tests/fixtures/ordinances/upstream-2178653-20261023.xml")).unwrap(),
-        SAMPLE_XML.replace("제1조(목적)", "제1조 제1조\n2(목적)"),
-        SAMPLE_XML.replace("</자치법규>", "<조><조문번호>000100</조문번호><조문여부>Y</조문여부><조내용>제1조제1항의 담당자</조내용></조></자치법규>"),
         SAMPLE_XML.replace("</자치법규>", ""),
         format!("{}<unfinished>", SAMPLE_XML.replace("</자치법규>", "")),
         format!("{SAMPLE_XML}<extra/>"),
@@ -399,7 +421,7 @@ fn invalid_documents_fail_like_python() {
 }
 
 #[test]
-fn reviewed_source_defects_preserve_existing_outputs_in_all_modes() {
+fn source_defects_match_python_in_all_modes() {
     let pipeline = pipeline_dir().expect("legalize-pipeline checkout is required");
     for (serial, fixture) in [
         ("2175357", "upstream-2175357.xml"),
@@ -411,39 +433,110 @@ fn reviewed_source_defects_preserve_existing_outputs_in_all_modes() {
         ("2178653", "upstream-2178653-20261018.xml"),
         ("2178653", "upstream-2178653-20261023.xml"),
     ] {
-        let temp = tempfile::tempdir().unwrap();
-        let cache = temp.path().join("cache");
-        fs::create_dir(&cache).unwrap();
-        fs::copy(
-            pipeline.join(format!("tests/fixtures/ordinances/{fixture}")),
-            cache.join(format!("{serial}.xml")),
-        )
-        .unwrap();
-        let output = temp.path().join("existing");
-        fs::create_dir(&output).unwrap();
-        let sentinel = output.join("published.md");
-        fs::write(&sentinel, "Existing publication").unwrap();
-        for mode in [None, Some("--tree"), Some("--validate")] {
-            let mut command = Command::new(env!("CARGO_BIN_EXE_ordinance-kr-compiler"));
-            command.arg(&cache).arg("-o").arg(&output);
-            if let Some(mode) = mode {
-                command.arg(mode);
-            }
-            let result = command.output().unwrap();
-            assert!(!result.status.success());
-            let error = String::from_utf8_lossy(&result.stderr);
-            assert!(
-                error.contains("duplicate ordinance article")
-                    || error.contains("repeated ordinance article heading"),
-                "{error}"
-            );
-            assert_eq!(
-                fs::read_to_string(&sentinel).unwrap(),
-                "Existing publication"
-            );
-            assert_eq!(fs::read_dir(&output).unwrap().count(), 1);
-        }
+        let xml = fs::read_to_string(pipeline.join(format!("tests/fixtures/ordinances/{fixture}")))
+            .unwrap();
+        assert_source_preservation(&xml, serial);
     }
+    let duplicate = "<조><조문번호>000100</조문번호><조문여부>Y</조문여부><조내용>  제1조 · &amp; &lt;개정&gt;\n```\n# 제목\n[참조](주소)  \n</조내용></조>";
+    assert_source_preservation(
+        &SAMPLE_XML.replace("</자치법규>", &format!("{duplicate}</자치법규>")),
+        "12345",
+    );
+    assert_source_preservation(
+        &SAMPLE_XML.replace("제1조(목적)", "제1조 제1조\n2(목적)"),
+        "12345",
+    );
+}
+
+fn assert_source_preservation(xml: &str, serial: &str) {
+    let (path, expected) = python_reference(xml);
+    assert!(expected.contains("원문오류:"));
+    let temp = tempfile::tempdir().unwrap();
+    let cache = temp.path().join("cache");
+    fs::create_dir(&cache).unwrap();
+    fs::write(cache.join(format!("{serial}.xml")), xml).unwrap();
+    for mode in [None, Some("--tree"), Some("--validate")] {
+        let output = temp
+            .path()
+            .join(mode.unwrap_or("bare").trim_start_matches("--"));
+        let mut command = Command::new(env!("CARGO_BIN_EXE_ordinance-kr-compiler"));
+        command.arg(&cache).arg("-o").arg(&output);
+        if let Some(mode) = mode {
+            command.arg(mode);
+        }
+        let result = command.output().unwrap();
+        assert!(
+            result.status.success(),
+            "{}",
+            String::from_utf8_lossy(&result.stderr)
+        );
+        if mode == Some("--validate") {
+            assert!(!output.exists());
+            continue;
+        }
+        let actual = if mode == Some("--tree") {
+            fs::read_to_string(output.join(&path)).unwrap()
+        } else {
+            let blob = Command::new("git")
+                .arg("--git-dir")
+                .arg(&output)
+                .arg("show")
+                .arg(format!("HEAD:{path}"))
+                .output()
+                .unwrap();
+            assert!(blob.status.success());
+            String::from_utf8(blob.stdout).unwrap()
+        };
+        assert_eq!(actual, expected, "serial={serial} mode={mode:?}");
+    }
+}
+
+#[test]
+fn source_defect_repeal_preserves_text_in_deletion_commit() {
+    let duplicate = "<조><조문번호>000100</조문번호><조문여부>Y</조문여부><조내용>제1조 중복 원문</조내용></조>";
+    let xml = SAMPLE_XML
+        .replace("일부개정", "폐지")
+        .replace("</자치법규>", &format!("{duplicate}</자치법규>"));
+    let (path, markdown) = python_reference(&xml);
+    let source = &markdown[markdown
+        .find("> 원천 XML의 조문 구조에 오류가 있습니다.")
+        .unwrap()..];
+    let temp = tempfile::tempdir().unwrap();
+    let cache = temp.path().join("cache");
+    fs::create_dir(&cache).unwrap();
+    fs::write(cache.join("12345.xml"), xml).unwrap();
+    let output = temp.path().join("out.git");
+    let result = Command::new(env!("CARGO_BIN_EXE_ordinance-kr-compiler"))
+        .arg(cache)
+        .arg("-o")
+        .arg(&output)
+        .output()
+        .unwrap();
+    assert!(
+        result.status.success(),
+        "{}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    let log = Command::new("git")
+        .arg("--git-dir")
+        .arg(&output)
+        .args(["log", "-1", "--format=%B"])
+        .output()
+        .unwrap();
+    assert!(log.status.success());
+    assert!(
+        String::from_utf8(log.stdout)
+            .unwrap()
+            .trim_end()
+            .ends_with(source.trim_end())
+    );
+    let tree = Command::new("git")
+        .arg("--git-dir")
+        .arg(output)
+        .args(["ls-tree", "-r", "HEAD", "--", &path])
+        .output()
+        .unwrap();
+    assert!(tree.status.success() && tree.stdout.is_empty());
 }
 
 #[test]
