@@ -151,6 +151,9 @@ pub struct DatePlan {
     markdown_hashes: Vec<String>,
     /// Source copies left out of the index because they could not be parsed (`{file, error}`).
     unparsable: Vec<Value>,
+    /// The LLM ledger the plan was built with (compiler#2): its identity for the index. When set,
+    /// the occurrence status `llm` is valid and the date index has schema version 2.
+    llm: Option<Value>,
 }
 
 /// Tracks a repository staging directory owned by an enforcement run.
@@ -2594,6 +2597,17 @@ static CLAUSE: LazyLock<Regex> = LazyLock::new(|| {
 fn read_clauses(text: &str, after_heading: bool) -> Vec<Clause> {
     #[cfg(test)]
     let _entry = trace_entry("read_clauses", after_heading, &[("decoded", text)]);
+    read_clauses_at(text, after_heading)
+        .into_iter()
+        .map(|(_, clause)| clause)
+        .collect()
+}
+
+/// `read_clauses` with the byte offset in `text` where each sentence starts: the start of the
+/// CLAUSE match for a read sentence and the detected start for an unread one. The order is the
+/// order of `read_clauses`. It leaves no test trace; the LLM selection (compiler#2) reads the
+/// offsets to tell the quoted sentence itself from the other sentences of its section.
+fn read_clauses_at(text: &str, after_heading: bool) -> Vec<(usize, Clause)> {
     static EXPLICIT: LazyLock<Regex> = LazyLock::new(|| {
         Regex::new(r"^(\d{4})년\s*(\d{1,2})월\s*(\d{1,2})일(?:(부터|에|로부터))?\s*$")
             .expect("valid date pattern")
@@ -2606,7 +2620,8 @@ fn read_clauses(text: &str, after_heading: bool) -> Vec<Clause> {
     let mut clauses = Vec::new();
     let mut read_starts = Vec::new();
     for captures in CLAUSE.captures_iter(text) {
-        read_starts.push(captures.get(0).map_or(0, |found| found.start()));
+        let start = captures.get(0).map_or(0, |found| found.start());
+        read_starts.push(start);
         let end = captures.get(0).map_or(text.len(), |found| found.end());
         let value = captures[1].trim();
         let compact = value.replace(' ', "");
@@ -2631,30 +2646,36 @@ fn read_clauses(text: &str, after_heading: bool) -> Vec<Clause> {
             } else {
                 (ClauseKind::Other, false, false)
             };
-        clauses.push(Clause {
-            kind,
-            proviso: starts_proviso(&text[end..]),
-            spaced: captures[2].contains(char::is_whitespace),
-            without_buteo,
-            explicit_without_buteo,
-            omitted_mark: starts_with_omitted_mark(&text[end..]),
-            unread: false,
-        });
+        clauses.push((
+            start,
+            Clause {
+                kind,
+                proviso: starts_proviso(&text[end..]),
+                spaced: captures[2].contains(char::is_whitespace),
+                without_buteo,
+                explicit_without_buteo,
+                omitted_mark: starts_with_omitted_mark(&text[end..]),
+                unread: false,
+            },
+        ));
     }
     // A sentence the detection found but this reader did not read (a sentence that breaks across
     // lines, the verb "시행함", a subject this reader does not know) is a sentence no approved
     // rule reads, so it stays as an unread clause and no date is taken from its section.
     for start in detected_sentence_starts(text, after_heading) {
         if !read_starts.contains(&start) {
-            clauses.push(Clause {
-                kind: ClauseKind::Other,
-                proviso: false,
-                spaced: false,
-                without_buteo: false,
-                explicit_without_buteo: false,
-                omitted_mark: false,
-                unread: true,
-            });
+            clauses.push((
+                start,
+                Clause {
+                    kind: ClauseKind::Other,
+                    proviso: false,
+                    spaced: false,
+                    without_buteo: false,
+                    explicit_without_buteo: false,
+                    omitted_mark: false,
+                    unread: true,
+                },
+            ));
         }
     }
     clauses
@@ -3124,6 +3145,277 @@ fn approval_entry(dataset: &str, source: &SourceRevision) -> Option<&'static App
                 == normalize_compact(approval.promulgation).as_deref()
             && approval.enforcement == Some(source.enforcement.as_str())
     })
+}
+
+/// The date path of an occurrence that a usable LLM judgment dated (compiler#2).
+const LLM_PATH: &str = "P11";
+/// The approval mark of an LLM selection in the gate (`GateMark::approval`). No registry entry
+/// uses it: their marks are revision numbers.
+const LLM_APPROVAL: &str = "llm";
+/// The reason prefix of an occurrence dated by an LLM judgment.
+const LLM_REASON: &str = "LLM judgment of the effective-date sentence (compiler#2)";
+/// The gate reason that a recorded parser result can carry when the gate, not the rule chain,
+/// left the revision unresolved.
+const GATE_REASON: &str =
+    "effective date is unresolved; the effective-date sentence names no approved form";
+
+/// The date that a usable LLM judgment selected (lead-c2-integration-contract-20261117) and the
+/// evidence it consumed. It plays the part of `ApprovalSelection` for the second approval source.
+struct LlmSelection {
+    date: Date,
+    /// The source ranges of every occurrence of the quote in its field (the consumed evidence C).
+    spans: Vec<SourceRange>,
+    /// What keeps the date from being confirmed (B2, user-c2-b2-llm-20261117,
+    /// user-c2-proviso-357-20261117, user-c2-quote-proviso-hold-20261117).
+    blocking: Vec<String>,
+    /// The `llm_judgment` evidence.
+    evidence: Value,
+    /// The reason of the occurrence.
+    reason: String,
+}
+
+/// Removes white space and keeps, for each remaining character, its byte offset and length in
+/// `text`, so a quote whose white space the judge folded still finds its place in the source.
+fn compact_positions(text: &str) -> (String, Vec<(usize, usize)>) {
+    let mut compact = String::new();
+    let mut places = Vec::new();
+    for (at, ch) in text.char_indices() {
+        if !ch.is_whitespace() {
+            compact.push(ch);
+            places.push((at, ch.len_utf8()));
+        }
+    }
+    (compact, places)
+}
+
+/// Every place of the quote in `text`, compared without white space: (start byte, end byte).
+fn quote_places(text: &str, quote: &str) -> Vec<(usize, usize)> {
+    let wanted: String = quote.chars().filter(|ch| !ch.is_whitespace()).collect();
+    if wanted.is_empty() {
+        return Vec::new();
+    }
+    let (compact, places) = compact_positions(text);
+    let width = wanted.chars().count();
+    let starts: Vec<usize> = compact.char_indices().map(|(at, _)| at).collect();
+    compact
+        .match_indices(&wanted)
+        .filter_map(|(byte, _)| {
+            let first = starts.binary_search(&byte).ok()?;
+            let (start, _) = places[first];
+            let (last, length) = places[first + width - 1];
+            Some((start, last + length))
+        })
+        .collect()
+}
+
+/// Tells whether a read sentence of the section gives the date of the judgment, by its outcome
+/// (user-c2-b2-llm-20261117 나).
+fn same_llm_date(kind: &ClauseKind, outcome: &str, date: Date, publication: Option<Date>) -> bool {
+    match (outcome, kind) {
+        ("explicit_date", ClauseKind::Explicit(written)) => *written == date,
+        ("promulgation_day", ClauseKind::Plain) => true,
+        ("promulgation_day", ClauseKind::Explicit(written)) => Some(*written) == publication,
+        ("label_date", ClauseKind::Plain) => true,
+        _ => false,
+    }
+}
+
+/// What selects no LLM date: the evidence `llm_not_applied`.
+fn llm_not_applied(reason: &str, detail: Value) -> Value {
+    let mut value = json!({"reason": reason, "decision": "lead-c2-integration-contract-20261117"});
+    if let (Some(object), Some(more)) = (value.as_object_mut(), detail.as_object()) {
+        object.extend(more.clone());
+    }
+    value
+}
+
+/// Selects the date of a usable LLM judgment for one source (design-v3-integration.md 3.2, v3.1,
+/// v3.3, v3.4). `None` when the ledger holds no usable judgment of this exact copy; `Err` holds
+/// the evidence `llm_not_applied` when a judgment exists and a condition fails.
+#[allow(clippy::too_many_arguments)]
+fn llm_approval(
+    dataset: &str,
+    source: &SourceRevision,
+    view: &SourceView,
+    addenda: &[Addendum],
+    texts: [(&str, &str); 4],
+    publication: Option<Date>,
+    ledger: &crate::llm_ledger::LlmLedger,
+) -> Result<Option<std::result::Result<LlmSelection, Value>>> {
+    let Some(entry) = ledger.find(&source.identity, &source.revision, &sha256(&source.xml)) else {
+        return Ok(None);
+    };
+    if compact_date(&source.enforcement).is_some() {
+        return Ok(Some(Err(llm_not_applied("valid-source-date", json!({})))));
+    }
+    // B3: the rule chain without any approval must give what the parser gave at judgment time.
+    let chain = rule_chain(dataset, source)?;
+    let recorded = &entry.parser;
+    let same = chain.status == recorded.status
+        && chain.enforcement_date == recorded.date
+        && chain.gate.path.is_none()
+        && chain.reason == recorded.rule;
+    if !same {
+        let after_gate = recorded.rule == GATE_REASON
+            || recorded.rule.starts_with(&format!(
+                "effective date is unresolved; {LABEL_AFTER_NEXT_DECISION}:"
+            ));
+        return Ok(Some(Err(llm_not_applied(
+            if after_gate {
+                "recorded-after-gate"
+            } else {
+                "chain-changed"
+            },
+            json!({"observed": {"status": chain.status, "date": chain.enforcement_date, "path": chain.gate.path, "rule": chain.reason},
+                "expected": {"status": recorded.status, "date": recorded.date, "path": null, "rule": recorded.rule}}),
+        ))));
+    }
+    let Some(date) = compact_date(&entry.date.replace('-', "")) else {
+        return Ok(Some(Err(llm_not_applied(
+            "invalid-date",
+            json!({"date": entry.date}),
+        ))));
+    };
+    let [(_, body), (_, outside), (_, amendment), (_, declaration)] = texts;
+    let mut fields: Vec<(String, &str, &SourceSegments)> = Vec::new();
+    match entry.field.as_str() {
+        "부칙" => {
+            for (index, block) in addenda.iter().enumerate() {
+                let (Some(element), Some(raw)) =
+                    (view.addendum_elements.get(index), view.addenda.get(index))
+                else {
+                    continue;
+                };
+                fields.push((format!("addendum:{element}"), block.text.as_str(), raw));
+            }
+        }
+        "조문" => {
+            fields.push(("body".to_owned(), body, &view.body));
+            fields.push(("outside".to_owned(), outside, &view.outside));
+        }
+        "제개정이유" => fields.push(("amendment_text".to_owned(), amendment, &view.amendment)),
+        "개정문" => fields.push(("declaration".to_owned(), declaration, &view.declaration)),
+        other => {
+            return Ok(Some(Err(llm_not_applied(
+                "unknown-field",
+                json!({"field": other}),
+            ))));
+        }
+    }
+    let mut spans = Vec::new();
+    let mut found = Vec::new();
+    let mut blocking = Vec::new();
+    let mut label_dates = BTreeSet::new();
+    for (container, text, raw) in fields {
+        let places = quote_places(text, &entry.quote);
+        if places.is_empty() {
+            continue;
+        }
+        let Ok(decoded) = raw.decoded() else { continue };
+        if decoded.text != text {
+            continue;
+        }
+        let units = unit_index(&decoded)?;
+        let pieces = piece_texts(raw);
+        for (at, end) in places {
+            let ranges = canonical_ranges(&map_bounded(&units, at, end)?, &pieces);
+            found.push(json!({"field": entry.field, "container": container, "source_ranges": ranges.iter().map(|(e, p, s, t)| json!([e, p, s, t])).collect::<Vec<_>>()}));
+            spans.extend(ranges);
+            let (from, to) = sentence_section(text, at);
+            if let Some(rest) = text[from..].lines().next().and_then(heading_rest) {
+                let (label, _, _) = heading_label(rest, publication);
+                for item in read_label_dates(&label, publication) {
+                    if let Some(day) = item.date {
+                        label_dates.insert(iso(day));
+                    }
+                }
+            }
+            #[cfg(test)]
+            let clauses = untraced(|| read_clauses_at(&text[from..to], false));
+            #[cfg(not(test))]
+            let clauses = read_clauses_at(&text[from..to], false);
+            // B2 reads the read sentences only; the gate takes the unread ones outside C (v3.4 1).
+            for (start, clause) in clauses.iter().filter(|(_, clause)| !clause.unread) {
+                let own = (at..end).contains(&(from + start));
+                if clause.proviso {
+                    blocking.push(
+                        if own {
+                            "quote-proviso"
+                        } else {
+                            "section-proviso"
+                        }
+                        .to_owned(),
+                    );
+                }
+                if own {
+                    continue;
+                }
+                if clause.kind == ClauseKind::Other {
+                    blocking.push("section-other-unreadable".to_owned());
+                } else if !same_llm_date(&clause.kind, &entry.outcome, date, publication) {
+                    blocking.push("section-other-date".to_owned());
+                }
+            }
+            if starts_proviso(&text[end..]) {
+                blocking.push("proviso-after-quote".to_owned());
+            }
+        }
+    }
+    if spans.is_empty() {
+        return Ok(Some(Err(llm_not_applied(
+            "quote-not-found",
+            json!({"field": entry.field}),
+        ))));
+    }
+    let proviso: String = entry
+        .proviso_quote
+        .chars()
+        .filter(|ch| !ch.is_whitespace())
+        .collect();
+    if entry.proviso
+        && ["다만", "단,", "단，"]
+            .iter()
+            .any(|word| proviso.starts_with(word))
+    {
+        blocking.push("llm-proviso".to_owned());
+    }
+    blocking.sort();
+    blocking.dedup();
+    let evidence = json!({
+        "decision": "lead-c2-integration-contract-20261117",
+        "ledger_sha256": ledger.sha256,
+        "model": ledger.policy.get("model"),
+        "effort": ledger.policy.get("effort"),
+        "prompt_version": ledger.policy.get("prompt_version"),
+        "runner_version": ledger.policy.get("runner_version"),
+        "judged_at": entry.judged_at,
+        "outcome": entry.outcome,
+        "date": entry.date,
+        "field": entry.field,
+        "quote": entry.quote,
+        "section_label": entry.section_label,
+        "section_label_dates": label_dates,
+        "proviso": entry.proviso,
+        "proviso_quote": entry.proviso_quote,
+        "next_promulgation": entry.next_promulgation,
+        "sources": found,
+        "blocking": blocking,
+    });
+    Ok(Some(Ok(LlmSelection {
+        date,
+        spans,
+        blocking,
+        evidence,
+        reason: format!("{LLM_REASON}: {}: {}", entry.field, entry.quote),
+    })))
+}
+
+/// Tells whether the individual approval registry names this revision, exempt entries included.
+/// The registry decides first; an LLM judgment never applies to such a revision.
+fn registered_revision(dataset: &str, revision: &str) -> bool {
+    APPROVALS
+        .iter()
+        .any(|approval| approval.dataset == dataset && approval.revision == revision)
 }
 
 /// Tells whether every range lies inside one of the consumed spans.
@@ -5121,6 +5413,8 @@ struct GateMark {
     approval_blocked: bool,
     /// The copies of the revision do not all carry the same approval (set by the plan).
     approval_mismatch: bool,
+    /// The mismatch of the copies involves an LLM selection (set by the plan, compiler#2).
+    llm_mismatch: bool,
     /// The date path of the occurrence (r25c-design.md 4: P0 to P10), when it has a date. The
     /// selection of an approval with a gate policy compares it with the registered condition.
     path: Option<&'static str>,
@@ -5159,12 +5453,21 @@ impl Occurrence {
         if !matches!(self.status.as_str(), "confirmed" | "estimated") {
             return;
         }
+        let llm = self.gate.approval == Some(LLM_APPROVAL);
         let withheld = if self.gate.provenance_error {
             "source-provenance-error"
         } else if self.gate.approval_mismatch {
-            "approved-copy-mismatch"
+            if self.gate.llm_mismatch {
+                "llm-copy-mismatch"
+            } else {
+                "approved-copy-mismatch"
+            }
         } else if self.gate.approval_blocked {
-            "approved-sentence-blocked"
+            if llm {
+                "llm-sentence-blocked"
+            } else {
+                "approved-sentence-blocked"
+            }
         } else {
             "added-detection-sentence"
         };
@@ -5225,7 +5528,17 @@ pub struct Prepared {
 impl Prepared {
     /// Resolves one source. A resolution error is kept until the plan reads it in order.
     pub fn resolve(dataset: &str, source: &SourceRevision) -> Self {
-        let occurrence = resolve_source(dataset, source);
+        Self::resolve_with(dataset, source, None)
+    }
+
+    /// Resolves one source with the usable judgments of an LLM ledger as the second approval
+    /// source (compiler#2). `None` gives exactly `resolve`.
+    pub fn resolve_with(
+        dataset: &str,
+        source: &SourceRevision,
+        llm: Option<&crate::llm_ledger::LlmLedger>,
+    ) -> Self {
+        let occurrence = resolve_source(dataset, source, llm);
         let gated = occurrence.as_ref().ok().and_then(|found| {
             let mut view = found.clone();
             view.apply_gate().then_some(view)
@@ -5252,8 +5565,12 @@ impl Prepared {
 
 /// Resolves one source and names its file when resolution fails. The gate is not applied: it
 /// waits for the processing of the whole plan.
-fn resolve_source(dataset: &str, source: &SourceRevision) -> Result<Occurrence> {
-    resolve_rules(dataset, source)
+fn resolve_source(
+    dataset: &str,
+    source: &SourceRevision,
+    llm: Option<&crate::llm_ledger::LlmLedger>,
+) -> Result<Occurrence> {
+    resolve_rules_with(dataset, source, true, llm)
         .with_context(|| format!("failed to resolve source dates {}", source.source_path))
 }
 
@@ -5718,8 +6035,9 @@ fn observed_body_names(body: &str, view: Option<&SourceView>, site: &'static str
     names_effective_date(body)
 }
 
+#[cfg(test)]
 fn resolve_rules(dataset: &str, source: &SourceRevision) -> Result<Occurrence> {
-    resolve_rules_with(dataset, source, true)
+    resolve_rules_with(dataset, source, true, None)
 }
 
 /// The rule chain without any approval, as it stands before the gate. The shared selection of an
@@ -5727,9 +6045,9 @@ fn resolve_rules(dataset: &str, source: &SourceRevision) -> Result<Occurrence> {
 /// no gate marks: only the status, the date and the date path of the result are read.
 fn rule_chain(dataset: &str, source: &SourceRevision) -> Result<Occurrence> {
     #[cfg(test)]
-    return untraced(|| resolve_rules_with(dataset, source, false));
+    return untraced(|| resolve_rules_with(dataset, source, false, None));
     #[cfg(not(test))]
-    resolve_rules_with(dataset, source, false)
+    resolve_rules_with(dataset, source, false, None)
 }
 
 /// The evidence `approval_not_applied` when the chain result of a revision that matches the
@@ -5760,6 +6078,7 @@ fn resolve_rules_with(
     dataset: &str,
     source: &SourceRevision,
     approvals: bool,
+    llm: Option<&crate::llm_ledger::LlmLedger>,
 ) -> Result<Occurrence> {
     let publication = compact_date(&source.promulgation);
     let DateText {
@@ -5861,15 +6180,63 @@ fn resolve_rules_with(
         extra.insert("approval_not_applied".to_owned(), difference);
         selection = None;
     }
-    let consumed: Vec<SourceRange> = selection
-        .as_ref()
-        .map_or_else(Vec::new, |selection| selection.spans.clone());
+    // The second approval source (compiler#2, lead-c2-integration-contract-20261117): a usable
+    // LLM judgment of this exact copy. The registry decides first: a revision that the registry
+    // names, exempt entries included, never takes an LLM date, and a ledger that names one stops
+    // the build (a conflict of the two sources needs a new decision).
+    let mut llm_selection: Option<LlmSelection> = None;
+    if let Some(ledger) = llm
+        && approvals
+        && !conflicted
+    {
+        if registered_revision(dataset, &source.revision) {
+            ensure!(
+                !ledger.names_revision(&source.revision),
+                "the LLM ledger names revision {} that the approval registry names",
+                source.revision
+            );
+        } else if selection.is_none() {
+            match llm_approval(
+                dataset,
+                source,
+                collected,
+                &addenda,
+                [
+                    ("body", body.as_str()),
+                    ("outside", outside.as_str()),
+                    ("amendment", amendment_text.as_str()),
+                    ("declaration", declaration.as_str()),
+                ],
+                publication,
+                ledger,
+            )? {
+                Some(Ok(chosen)) => llm_selection = Some(chosen),
+                Some(Err(not_applied)) => {
+                    extra.insert("llm_not_applied".to_owned(), not_applied);
+                }
+                None => {}
+            }
+        }
+    }
+    let chosen = selection.is_some() || llm_selection.is_some();
+    let consumed: Vec<SourceRange> = match (&selection, &llm_selection) {
+        (Some(selection), _) => selection.spans.clone(),
+        (None, Some(selection)) => selection.spans.clone(),
+        (None, None) => Vec::new(),
+    };
     if let Some(selection) = &selection {
         effective = Some(selection.date);
         path = Some(APPROVAL_PATH);
         text_derived = true;
         reason = selection.reason();
         selection.record(source, &mut extra);
+    }
+    if let Some(selection) = &llm_selection {
+        effective = Some(selection.date);
+        path = Some(LLM_PATH);
+        text_derived = true;
+        reason = selection.reason.clone();
+        extra.insert("llm_judgment".to_owned(), selection.evidence.clone());
     }
     let mut marks = (false, false);
     let mut extraction_used = false;
@@ -5916,10 +6283,7 @@ fn resolve_rules_with(
                 .borrow_mut()
                 .extend(evidence.errors.iter().cloned());
             approval_unread.set(
-                approval_unread.get()
-                    || evidence
-                        .scanned_marks(0, PhraseVariant::All, selection.is_some())
-                        .0,
+                approval_unread.get() || evidence.scanned_marks(0, PhraseVariant::All, chosen).0,
             );
             added_any(&body, &body_raw, &evidence)
         };
@@ -5948,9 +6312,7 @@ fn resolve_rules_with(
                     .extend(evidence.errors.iter().cloned());
                 approval_unread.set(
                     approval_unread.get()
-                        || evidence
-                            .scanned_marks(0, PhraseVariant::All, selection.is_some())
-                            .0,
+                        || evidence.scanned_marks(0, PhraseVariant::All, chosen).0,
                 );
                 added_any(&block.text, &block.raw, &evidence)
             })
@@ -6092,7 +6454,7 @@ fn resolve_rules_with(
             extraction_used,
             collected,
             &consumed,
-            selection.is_some(),
+            chosen,
             &mut errors,
         );
         provenance.borrow_mut().extend(errors);
@@ -6101,9 +6463,12 @@ fn resolve_rules_with(
     // A proviso after the approved sentence or another read date in its section keeps the
     // selected date from being confirmed (r25c-design.md 8); the date is held, not replaced.
     let approval_blocked = gated
-        && selection
+        && (selection
             .as_ref()
-            .is_some_and(|selection| !selection.blocking.is_empty());
+            .is_some_and(|selection| !selection.blocking.is_empty())
+            || llm_selection
+                .as_ref()
+                .is_some_and(|selection| !selection.blocking.is_empty()));
     if approval_blocked {
         marks = (true, true);
     }
@@ -6550,9 +6915,11 @@ fn resolve_rules_with(
             provenance_error: !provenance.is_empty(),
             approval: selection
                 .as_ref()
-                .map(|selection| selection.approval.revision),
+                .map(|selection| selection.approval.revision)
+                .or(llm_selection.as_ref().map(|_| LLM_APPROVAL)),
             approval_blocked,
             approval_mismatch: false,
+            llm_mismatch: false,
             path,
         },
     })
@@ -6566,14 +6933,28 @@ impl DatePlan {
 
     /// Preserves exact source copies and assigns ranks to each occurrence.
     pub fn new(dataset: &str, enforcement: bool, sources: Vec<SourceRevision>) -> Result<Self> {
+        Self::new_with(dataset, enforcement, sources, None)
+    }
+
+    /// `new` with the usable judgments of an LLM ledger as the second approval source
+    /// (compiler#2). `None` gives exactly `new`.
+    pub fn new_with(
+        dataset: &str,
+        enforcement: bool,
+        sources: Vec<SourceRevision>,
+        llm: Option<&crate::llm_ledger::LlmLedger>,
+    ) -> Result<Self> {
         // Resolving one source never depends on another, so all sources resolve in parallel.
-        let prepared = parallel_map(&sources, |source| Prepared::resolve(dataset, source));
+        let prepared = parallel_map(&sources, |source| {
+            Prepared::resolve_with(dataset, source, llm)
+        });
         Self::assemble(
             dataset,
             enforcement,
             sources.into_iter().zip(prepared).map(Ok),
             true,
             true,
+            llm,
         )
     }
 
@@ -6586,16 +6967,29 @@ impl DatePlan {
         sources: impl IntoIterator<Item = Result<SourceRevision>>,
         keep_xml: bool,
     ) -> Result<Self> {
+        Self::from_sources_with(dataset, enforcement, sources, keep_xml, None)
+    }
+
+    /// `from_sources` with the usable judgments of an LLM ledger as the second approval source
+    /// (compiler#2). `None` gives exactly `from_sources`.
+    pub fn from_sources_with(
+        dataset: &str,
+        enforcement: bool,
+        sources: impl IntoIterator<Item = Result<SourceRevision>>,
+        keep_xml: bool,
+        llm: Option<&crate::llm_ledger::LlmLedger>,
+    ) -> Result<Self> {
         Self::assemble(
             dataset,
             enforcement,
             sources.into_iter().map(|source| {
                 let source = source?;
-                let prepared = Prepared::resolve(dataset, &source);
+                let prepared = Prepared::resolve_with(dataset, &source, llm);
                 Ok((source, prepared))
             }),
             keep_xml,
             true,
+            llm,
         )
     }
 
@@ -6609,7 +7003,7 @@ impl DatePlan {
         enforcement: bool,
         items: impl IntoIterator<Item = Result<(SourceRevision, Prepared)>>,
     ) -> Result<Self> {
-        Self::assemble(dataset, enforcement, items, false, true)
+        Self::assemble(dataset, enforcement, items, false, true, None)
     }
 
     /// Builds the plan from sources paired with their resolved occurrence.
@@ -6619,6 +7013,7 @@ impl DatePlan {
         sources: impl IntoIterator<Item = Result<(SourceRevision, Prepared)>>,
         keep_xml: bool,
         keep_markdown: bool,
+        llm: Option<&crate::llm_ledger::LlmLedger>,
     ) -> Result<Self> {
         let mut plan = Self {
             dataset: dataset.to_owned(),
@@ -6636,6 +7031,11 @@ impl DatePlan {
             bodies: BTreeMap::new(),
             markdown_hashes: Vec::new(),
             unparsable: Vec::new(),
+            llm: llm.map(|ledger| {
+                json!({"ledger": format!("ledger/{}.json", ledger.dataset), "sha256": ledger.sha256,
+                    "policy": ledger.policy, "protected_list_sha256": ledger.protected_list_sha256,
+                    "usable_judgments": ledger.len(), "decision": "lead-c2-integration-contract-20261117"})
+            }),
         };
         let mut copies = BTreeMap::new();
         for item in sources {
@@ -6690,9 +7090,15 @@ impl DatePlan {
             plan.sources.push(source);
         }
         plan.defer_late_label_dates();
+        if plan.llm.is_some() {
+            plan.check_llm_next_revisions();
+        }
         plan.apply_gate();
         if enforcement {
             plan.leave_revived_unresolved();
+        }
+        if plan.llm.is_some() {
+            plan.mark_llm_dates();
         }
         for enforcement in [false, true] {
             for (rank, source) in plan.ordered(enforcement).into_iter().enumerate() {
@@ -6805,6 +7211,133 @@ impl DatePlan {
         }
     }
 
+    /// Checks each date that an LLM judgment selected against the next revision the plan holds
+    /// (design-v3-integration.md v3.1, v3.2 N-b and N-c, v3.4 4). The judge recorded the earliest
+    /// later promulgation date it knew; a next revision that came later, or a next revision of the
+    /// same promulgation date in the order key of `defer_late_label_dates`, takes the date away.
+    /// When the recorded and the actual next revision agree, a section label dated on or after it
+    /// takes the date away for a promulgation-day or label-date judgment
+    /// (`user-label-not-on-or-after-next-revision-20261103`; an explicit date keeps priority over
+    /// labels). It runs after the cap of `defer_late_label_dates` and before the gate.
+    fn check_llm_next_revisions(&mut self) {
+        let key = |plan: &Self, source: usize| -> Option<(String, u64, String)> {
+            Some((
+                plan.occurrence(source).promulgation_date.clone()?,
+                plan.sources[source].serial,
+                plan.sources[source].revision.clone(),
+            ))
+        };
+        let mut by_identity: BTreeMap<String, Vec<(String, u64, String)>> = BTreeMap::new();
+        for source in 0..self.sources.len() {
+            if let Some(key) = key(self, source) {
+                by_identity
+                    .entry(self.sources[source].identity.clone())
+                    .or_default()
+                    .push(key);
+            }
+        }
+        for keys in by_identity.values_mut() {
+            keys.sort();
+            keys.dedup();
+        }
+        let mut withheld = Vec::new();
+        for source in 0..self.sources.len() {
+            let occurrence = self.occurrence(source);
+            let judgment = &occurrence.date_evidence["llm_judgment"];
+            if occurrence.status != "confirmed" || judgment.is_null() {
+                continue;
+            }
+            let Some(own) = key(self, source) else {
+                continue;
+            };
+            let keys = &by_identity[&self.sources[source].identity];
+            let next = keys.iter().find(|other| **other > own);
+            let strict = keys
+                .iter()
+                .find(|other| other.0 > own.0)
+                .map(|other| other.0.clone());
+            let recorded = judgment["next_promulgation"].as_str().map(str::to_owned);
+            let found = if next.is_some_and(|next| next.0 == own.0) {
+                Some((
+                    "next-revision-definition",
+                    "effective date is unresolved; the next revision has the same promulgation date",
+                ))
+            } else if strict != recorded {
+                Some((
+                    "next-revision-changed",
+                    "effective date is unresolved; the next revision changed after the LLM judgment",
+                ))
+            } else if judgment["outcome"] != "explicit_date"
+                && recorded.as_deref().is_some_and(|next| {
+                    judgment["section_label_dates"]
+                        .as_array()
+                        .into_iter()
+                        .flatten()
+                        .filter_map(Value::as_str)
+                        .any(|label| label >= next)
+                })
+            {
+                Some((
+                    "label-on-or-after-next-revision",
+                    "effective date is unresolved; the quoted section belongs to a later revision",
+                ))
+            } else {
+                None
+            };
+            if let Some((cause, reason)) = found {
+                withheld.push((source, cause, reason, recorded, strict, next.cloned()));
+            }
+        }
+        for (source, cause, reason, recorded, strict, next) in withheld {
+            let revision = self.source_revision[source];
+            let occurrence =
+                &mut self.revisions[revision].occurrences[self.source_occurrence[source]];
+            occurrence.leave_unresolved(reason, "llm-next-revision");
+            if let Some(evidence) = occurrence.date_evidence.as_object_mut() {
+                evidence.insert(
+                    "llm_not_applied".to_owned(),
+                    llm_not_applied(
+                        cause,
+                        json!({"recorded_next_promulgation": recorded, "actual_next_promulgation": strict,
+                            "actual_next_revision": next.map(|next| next.2)}),
+                    ),
+                );
+            }
+            let first = self.revisions[revision].occurrences[0].clone();
+            let target = &mut self.revisions[revision];
+            target.status = Some(first.status);
+            target.enforcement_date = first.enforcement_date;
+            target.reason = first.reason;
+            target.date_evidence = first.date_evidence;
+        }
+    }
+
+    /// The single place where a date that an LLM judgment selected shows as status `llm`
+    /// (design-v3-integration.md 3.3). It runs after every other processing of the plan, so the
+    /// gate, the cap and the repeal rule read the date as confirmed. A date that one of them took
+    /// away stays unresolved with its `llm_judgment` evidence.
+    fn mark_llm_dates(&mut self) {
+        for revision in &mut self.revisions {
+            let mut changed = false;
+            for occurrence in &mut revision.occurrences {
+                if occurrence.status == "confirmed"
+                    && !occurrence.date_evidence["llm_judgment"].is_null()
+                {
+                    occurrence.status = "llm".to_owned();
+                    changed = true;
+                }
+            }
+            if !changed {
+                continue;
+            }
+            let first = revision.occurrences[0].clone();
+            revision.status = Some(first.status);
+            revision.enforcement_date = first.enforcement_date;
+            revision.reason = first.reason;
+            revision.date_evidence = first.date_evidence;
+        }
+    }
+
     /// Leaves unresolved a revision that a later-promulgated repeal takes away before its own
     /// effective date (user decision `user-repeal-revival-unresolved-20261117`, design 9). It runs
     /// for the enforcement basis only, after the gate and before the ranks, so the repeal and the
@@ -6831,8 +7364,11 @@ impl DatePlan {
         let mut repeals: BTreeMap<&str, Vec<(Order, &str)>> = BTreeMap::new();
         for source in 0..self.sources.len() {
             let occurrence = self.occurrence(source);
+            // A repeal that an LLM judgment dated is no confirmed repeal here
+            // (user-c2-llm-repeal-no-20261117): an LLM date never changes another revision.
             if let (true, "confirmed", Some(effective), Some(key)) = (
-                self.sources[source].repeal,
+                self.sources[source].repeal
+                    && occurrence.date_evidence.get("llm_judgment").is_none(),
                 occurrence.status.as_str(),
                 occurrence.enforcement_date.as_deref(),
                 order(self, source),
@@ -6919,11 +7455,24 @@ impl DatePlan {
             // A copy that does not carry the same approval as another copy (it fails a condition
             // of the registration) withholds the group; the approval never passes to that copy
             // and no copy falls back to its source date (r25c-design.md 8).
-            let approvals: BTreeSet<Option<&'static str>> = members
+            // An LLM selection also carries its date: copies that the LLM dated differently do not
+            // carry the same approval (compiler#2). A registry selection carries no date here.
+            let approvals: BTreeSet<(Option<&'static str>, Option<String>)> = members
                 .iter()
-                .map(|source| self.occurrence(*source).gate.approval)
+                .map(|source| {
+                    let occurrence = self.occurrence(*source);
+                    let date = (occurrence.gate.approval == Some(LLM_APPROVAL))
+                        .then(|| occurrence.enforcement_date.clone())
+                        .flatten();
+                    (occurrence.gate.approval, date)
+                })
                 .collect();
-            let mismatch = approvals.len() > 1 && approvals.iter().any(Option::is_some);
+            let mismatch =
+                approvals.len() > 1 && approvals.iter().any(|(approval, _)| approval.is_some());
+            let llm_mismatch = mismatch
+                && approvals
+                    .iter()
+                    .any(|(approval, _)| *approval == Some(LLM_APPROVAL));
             if !mismatch
                 && !members
                     .iter()
@@ -6936,6 +7485,7 @@ impl DatePlan {
                 let occurrence =
                     &mut self.revisions[revision].occurrences[self.source_occurrence[*source]];
                 occurrence.gate.approval_mismatch |= mismatch;
+                occurrence.gate.llm_mismatch |= llm_mismatch;
                 occurrence.withhold();
                 let first = self.revisions[revision].occurrences[0].clone();
                 let target = &mut self.revisions[revision];
@@ -6967,6 +7517,7 @@ impl DatePlan {
             let exposed = occurrence.exposure_date.is_some();
             let coherent = match occurrence.status.as_str() {
                 "confirmed" | "estimated" => effective && !exposed,
+                "llm" if self.llm.is_some() => effective && !exposed,
                 "unresolved" => {
                     !effective
                         && publication
@@ -7119,13 +7670,20 @@ impl DatePlan {
             original.starts_with("---\n"),
             "source body lacks frontmatter"
         );
-        let extra = format!(
+        let mut extra = format!(
             "날짜판단상태: {}\n법적시행일: {}\n검색배치일: {}\n시행일판단근거: {}\n",
             serde_json::to_string(&occurrence.status)?,
             serde_json::to_string(&occurrence.enforcement_date)?,
             serde_json::to_string(&self.event_date(source, true))?,
             serde_json::to_string(&occurrence.reason)?
         );
+        // A date of an LLM judgment names its sentence (docs/llm-date-judgment.md, compiler#2).
+        if occurrence.status == "llm" {
+            extra.push_str(&format!(
+                "시행일근거문장: {}\n",
+                serde_json::to_string(&occurrence.date_evidence["llm_judgment"]["quote"])?
+            ));
+        }
         Ok(format!("---\n{extra}{}", &original[4..]).into_bytes())
     }
 
@@ -7240,6 +7798,8 @@ impl DatePlan {
                         source.name,
                         if occurrence.status == "estimated" {
                             " (추정)"
+                        } else if occurrence.status == "llm" {
+                            " (LLM 판단)"
                         } else {
                             ""
                         },
@@ -7437,7 +7997,8 @@ impl DatePlan {
         }
         out.extend_from_slice(
             format!(
-                "],\n  \"schema_version\": 1,\n  \"snapshot_date\": {}\n}}",
+                "],\n  \"schema_version\": {},\n  \"snapshot_date\": {}\n}}",
+                if self.llm.is_some() { 2 } else { 1 },
                 serde_json::to_string(&date)?
             )
             .as_bytes(),
@@ -7621,20 +8182,41 @@ impl DatePlan {
                 "attributed_label": evidence["attributed_label"],
             }));
         }
-        for list in [&mut entries, &mut deferred] {
+        // A label date that an LLM judgment selected is reported too (user decision, comment
+        // 6599299359 item 4; compiler#2). The list exists only in a plan built with a ledger.
+        let mut llm_entries = Vec::new();
+        for revision in &self.revisions {
+            let judgment = &revision.date_evidence["llm_judgment"];
+            if revision.status.as_deref() == Some("llm") && judgment["outcome"] == "label_date" {
+                llm_entries.push(json!({
+                    "dataset": self.dataset,
+                    "identity": revision.identity,
+                    "revision": revision.revision,
+                    "promulgation_date": revision.promulgation_date,
+                    "label_date": revision.enforcement_date,
+                    "section_label": judgment["section_label"],
+                    "quote": judgment["quote"],
+                }));
+            }
+        }
+        for list in [&mut entries, &mut deferred, &mut llm_entries] {
             list.sort_by(|a, b| {
                 (a["identity"].as_str(), a["revision"].as_str())
                     .cmp(&(b["identity"].as_str(), b["revision"].as_str()))
             });
         }
-        Ok(json!({
+        let mut report = json!({
             "schema_version": 1,
             "basis": self.basis,
             "dataset": self.dataset,
             "decision": "single-label-date-priority-20261103",
             "label_date_applied": entries,
             "label_date_unresolved_after_next_revision": deferred,
-        }))
+        });
+        if self.llm.is_some() {
+            report["llm_label_date_applied"] = json!(llm_entries);
+        }
+        Ok(report)
     }
 
     /// Verifies reachable body references and publishes the mandatory external index last.
@@ -7880,6 +8462,10 @@ impl DatePlan {
         };
         manifest["date_index"] = json!({"schema_version":1, "basis":self.basis, "dataset":self.dataset, "head_commit_sha":head,
             "revisions":self.revisions, "snapshots":self.snapshots, "unparsable":self.unparsable});
+        if let Some(ledger) = &self.llm {
+            manifest["date_index"]["schema_version"] = json!(2);
+            manifest["date_index"]["llm_ledger"] = ledger.clone();
+        }
         Ok((serde_json::to_vec_pretty(&manifest)?, diagnostic))
     }
 }
@@ -19257,5 +19843,493 @@ mod repeal_revival_tests {
         assert_eq!(occurrence["date_evidence"], resolved.date_evidence);
         assert_eq!(occurrence["reason"], json!(resolved.reason));
         assert_eq!(index["status"], "confirmed");
+    }
+}
+
+/// The LLM ledger as the second approval source (compiler#2, design-v3-integration.md).
+#[cfg(test)]
+mod llm_tests {
+    use super::*;
+    use crate::llm_ledger::LlmLedger;
+
+    /// An ordinance source of identity 1 with its addendum text.
+    fn source(
+        revision: &str,
+        promulgation: &str,
+        enforcement: &str,
+        amendment: &str,
+        addendum: &str,
+    ) -> SourceRevision {
+        let xml = format!(
+            "<LawService><공포번호>{revision}</공포번호><조문><조><조내용>제1조(목적) 이 조례는 운영을 정한다.</조내용></조></조문><부칙><부칙공포일자>{promulgation}</부칙공포일자><부칙내용><![CDATA[{addendum}]]></부칙내용></부칙></LawService>"
+        );
+        SourceRevision {
+            identity: "1".to_owned(),
+            revision: revision.to_owned(),
+            name: "test".to_owned(),
+            category: "조례".to_owned(),
+            canonical_path: "p.md".to_owned(),
+            source_path: format!("{revision}.xml"),
+            xml: xml.into_bytes(),
+            promulgation: promulgation.to_owned(),
+            enforcement: enforcement.to_owned(),
+            amendment: amendment.to_owned(),
+            repeal: amendment.contains("폐지"),
+            markdown: format!("---\nname: {revision}\n---\nbody\n").into_bytes(),
+            secondary_name: String::new(),
+            secondary_number: 0,
+            serial: revision.parse().unwrap(),
+            copy_priority: 0,
+            copy_conflict: None,
+        }
+    }
+
+    /// One judgment: (outcome, date, quote, proviso, proviso quote, next promulgation).
+    struct Judged<'a> {
+        outcome: &'a str,
+        date: &'a str,
+        quote: &'a str,
+        proviso: bool,
+        proviso_quote: &'a str,
+        next: Option<&'a str>,
+    }
+
+    fn judged<'a>(outcome: &'a str, date: &'a str, quote: &'a str) -> Judged<'a> {
+        Judged {
+            outcome,
+            date,
+            quote,
+            proviso: false,
+            proviso_quote: "",
+            next: None,
+        }
+    }
+
+    /// A ledger whose entries record, as the parser result at judgment time, what the rule chain
+    /// gives now (so B3 holds) unless `rule` overrides the recorded rule.
+    fn ledger(items: &[(&SourceRevision, Judged, Option<&str>)]) -> LlmLedger {
+        let mut entries: Vec<Value> = items
+            .iter()
+            .map(|(source, judgment, rule)| {
+                let chain = rule_chain("ordinances", source).unwrap();
+                json!({"key": {"dataset": "ordinances", "identity": source.identity, "revision": source.revision,
+                        "source_sha256": sha256(&source.xml)},
+                    "kind": "judged", "adoptable": true, "date": judgment.date,
+                    "model": "m", "effort": "default", "prompt_version": "p", "runner_version": "r2", "judged_at": "t",
+                    "inputs": {"next_promulgation": judgment.next},
+                    "parser_at_judgment": {"category": "judge", "status": chain.status, "date": chain.enforcement_date,
+                        "rule": rule.map_or(chain.reason.clone(), str::to_owned)},
+                    "judgment": {"outcome": judgment.outcome, "basis_field": "부칙", "basis_quote": judgment.quote,
+                        "section_label": "", "proviso": judgment.proviso, "proviso_quote": judgment.proviso_quote}})
+            })
+            .collect();
+        entries.sort_by_key(|entry| {
+            ["dataset", "identity", "revision", "source_sha256"]
+                .map(|field| entry["key"][field].as_str().unwrap().to_owned())
+        });
+        let doc = json!({"schema_version": 1, "dataset": "ordinances",
+            "policy": {"model": "m", "effort": "default", "prompt_version": "p", "runner_version": "r2"},
+            "protected_list_sha256": null, "entries": entries});
+        LlmLedger::parse(&serde_json::to_vec(&doc).unwrap(), "ordinances").unwrap()
+    }
+
+    fn plan(sources: Vec<SourceRevision>, ledger: &LlmLedger) -> DatePlan {
+        DatePlan::new_with("ordinances", true, sources, Some(ledger)).unwrap()
+    }
+
+    fn blocking(found: &Occurrence) -> Vec<String> {
+        found.date_evidence["llm_judgment"]["blocking"]
+            .as_array()
+            .map(|list| {
+                list.iter()
+                    .map(|item| item.as_str().unwrap().to_owned())
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
+    #[test]
+    fn a_prefixed_quote_of_an_unreadable_form_is_its_own_clause() {
+        // 681330: the quote starts at "①", the clause at "이 규칙은"; the parser reads the value as
+        // Other. The quote itself stays out of the same-date comparison (v3.3).
+        let one = source(
+            "681330",
+            "19970801",
+            "99991231",
+            "일부개정",
+            "부칙\n①(시행일) 이 규칙은 1997. 9. 1일부터 시행한다.",
+        );
+        let quote = "①(시행일) 이 규칙은 1997. 9. 1일부터 시행한다.";
+        let built = plan(
+            vec![one.clone()],
+            &ledger(&[(&one, judged("explicit_date", "1997-09-01", quote), None)]),
+        );
+        let found = built.occurrence(0);
+        assert!(blocking(found).is_empty(), "{:?}", blocking(found));
+        assert_eq!(
+            (found.status.as_str(), found.enforcement_date.as_deref()),
+            ("llm", Some("1997-09-01"))
+        );
+        assert_eq!(found.gate.path, Some(LLM_PATH));
+        let body = String::from_utf8(built.replay_body(0).unwrap()).unwrap();
+        assert!(body.contains("날짜판단상태: \"llm\""), "{body}");
+        assert!(
+            body.contains(&format!(
+                "시행일근거문장: {}",
+                serde_json::to_string(quote).unwrap()
+            )),
+            "{body}"
+        );
+        // The old definition (a clause that starts where the quote starts) would compare it.
+        let text = "부칙\n①(시행일) 이 규칙은 1997. 9. 1일부터 시행한다.";
+        let at = text.find('①').unwrap();
+        let own: Vec<usize> = read_clauses_at(text, false)
+            .iter()
+            .map(|(start, _)| *start)
+            .collect();
+        assert!(!own.contains(&at), "the clause does not start at the quote");
+    }
+
+    #[test]
+    fn a_proviso_inside_the_quote_holds_the_date() {
+        // 808395: the parser reads "단" with a space as a proviso of the quoted clause
+        // (user-c2-quote-proviso-hold-20261117).
+        let one = source(
+            "808395",
+            "20110415",
+            "99991231",
+            "일부개정",
+            "부칙 (2011.4.15.) 이 조례는 공포한 날부터 시행한다. 단 제3조제5항은 2011년 7월 1일부터 시행한다.",
+        );
+        let quote =
+            "이 조례는 공포한 날부터 시행한다. 단 제3조제5항은 2011년 7월 1일부터 시행한다.";
+        let built = plan(
+            vec![one.clone()],
+            &ledger(&[(&one, judged("promulgation_day", "2011-04-15", quote), None)]),
+        );
+        let found = built.occurrence(0);
+        assert_eq!(found.status, "unresolved");
+        assert!(
+            blocking(found).contains(&"quote-proviso".to_owned()),
+            "{:?}",
+            blocking(found)
+        );
+        assert_eq!(found.date_evidence["date_withheld"], "llm-sentence-blocked");
+    }
+
+    #[test]
+    fn a_proviso_the_parser_does_not_read_applies() {
+        // 862624: the parser reads no clause in "시행하되, 단 ..."; the proviso of the judgment does
+        // not start with 다만 or 단, (user-c2-proviso-357-20261117), so the date applies.
+        let one = source(
+            "862624",
+            "20110310",
+            "99991231",
+            "일부개정",
+            "부칙\n이 조례는 공포한 날부터 시행하되, 단 제7조제2항은 2011년 1월 1일부터 적용한다.",
+        );
+        let quote =
+            "이 조례는 공포한 날부터 시행하되, 단 제7조제2항은 2011년 1월 1일부터 적용한다.";
+        let mut judgment = judged("promulgation_day", "2011-03-10", quote);
+        judgment.proviso = true;
+        judgment.proviso_quote = "단 제7조제2항은 2011년 1월 1일부터 적용한다.";
+        let built = plan(vec![one.clone()], &ledger(&[(&one, judgment, None)]));
+        let found = built.occurrence(0);
+        assert!(blocking(found).is_empty(), "{:?}", blocking(found));
+        assert_eq!(
+            (found.status.as_str(), found.enforcement_date.as_deref()),
+            ("llm", Some("2011-03-10"))
+        );
+    }
+
+    #[test]
+    fn a_proviso_that_starts_with_daman_holds_the_date() {
+        let one = source(
+            "700001",
+            "20110310",
+            "99991231",
+            "일부개정",
+            "부칙\n이 조례는 공포한 날부터 시행한다.\n",
+        );
+        let mut judgment = judged(
+            "promulgation_day",
+            "2011-03-10",
+            "이 조례는 공포한 날부터 시행한다.",
+        );
+        judgment.proviso = true;
+        judgment.proviso_quote = "다만, 제2조는 2012년 1월 1일부터 시행한다.";
+        let found = plan(vec![one.clone()], &ledger(&[(&one, judgment, None)]))
+            .occurrence(0)
+            .clone();
+        assert_eq!(found.status, "unresolved");
+        assert_eq!(blocking(&found), vec!["llm-proviso".to_owned()]);
+    }
+
+    #[test]
+    fn another_date_or_an_unreadable_sentence_in_the_section_holds_the_date() {
+        for (other, reason) in [
+            (
+                "이 조례는 2012년 1월 1일부터 시행한다.",
+                "section-other-date",
+            ),
+            (
+                "이 조례는 의회의 승인을 받은 날부터 시행한다.",
+                "section-other-unreadable",
+            ),
+        ] {
+            let one = source(
+                "700002",
+                "20110310",
+                "99991231",
+                "일부개정",
+                &format!("부칙\n이 조례는 공포일부터 시행한다.\n{other}"),
+            );
+            let found = plan(
+                vec![one.clone()],
+                &ledger(&[(
+                    &one,
+                    judged(
+                        "promulgation_day",
+                        "2011-03-10",
+                        "이 조례는 공포일부터 시행한다.",
+                    ),
+                    None,
+                )]),
+            )
+            .occurrence(0)
+            .clone();
+            assert_eq!(found.status, "unresolved", "{other}");
+            assert!(
+                blocking(&found).contains(&reason.to_owned()),
+                "{other}: {:?}",
+                blocking(&found)
+            );
+        }
+    }
+
+    #[test]
+    fn a_changed_chain_or_a_valid_source_date_selects_nothing() {
+        let one = source(
+            "700003",
+            "20110310",
+            "99991231",
+            "일부개정",
+            "부칙\n이 조례는 공포일부터 시행한다.",
+        );
+        let quote = "이 조례는 공포일부터 시행한다.";
+        let changed = plan(
+            vec![one.clone()],
+            &ledger(&[(
+                &one,
+                judged("promulgation_day", "2011-03-10", quote),
+                Some("another rule"),
+            )]),
+        );
+        let found = changed.occurrence(0);
+        assert_eq!(found.status, "unresolved");
+        assert_eq!(
+            found.date_evidence["llm_not_applied"]["reason"],
+            "chain-changed"
+        );
+        let gated = plan(
+            vec![one.clone()],
+            &ledger(&[(
+                &one,
+                judged("promulgation_day", "2011-03-10", quote),
+                Some(GATE_REASON),
+            )]),
+        );
+        assert_eq!(
+            gated.occurrence(0).date_evidence["llm_not_applied"]["reason"],
+            "recorded-after-gate"
+        );
+        let valid = source(
+            "700004",
+            "20110310",
+            "20110401",
+            "일부개정",
+            "부칙\n이 조례는 공포일부터 시행한다.",
+        );
+        let found = plan(
+            vec![valid.clone()],
+            &ledger(&[(
+                &valid,
+                judged("promulgation_day", "2011-03-10", quote),
+                None,
+            )]),
+        )
+        .occurrence(0)
+        .clone();
+        assert_eq!(
+            (found.status.as_str(), found.enforcement_date.as_deref()),
+            ("confirmed", Some("2011-04-01"))
+        );
+        assert_eq!(
+            found.date_evidence["llm_not_applied"]["reason"],
+            "valid-source-date"
+        );
+        let missing = plan(
+            vec![one.clone()],
+            &ledger(&[(
+                &one,
+                judged("promulgation_day", "2011-03-10", "이 문장은 원문에 없다."),
+                None,
+            )]),
+        );
+        assert_eq!(
+            missing.occurrence(0).date_evidence["llm_not_applied"]["reason"],
+            "quote-not-found"
+        );
+    }
+
+    #[test]
+    fn the_registry_decides_first_and_a_conflict_stops() {
+        // 1000238 is an exempt registry entry; a usable judgment of it stops the build.
+        let named = source(
+            "1000238",
+            "20071031",
+            "99991231",
+            "일부개정",
+            "부칙\n이 조례는 공포 후 1개월이 경과한 날부터 시행한다.",
+        );
+        let ledger = ledger(&[(
+            &named,
+            judged(
+                "promulgation_day",
+                "2007-10-31",
+                "이 조례는 공포 후 1개월이 경과한 날부터 시행한다.",
+            ),
+            None,
+        )]);
+        assert!(DatePlan::new_with("ordinances", true, vec![named], Some(&ledger)).is_err());
+    }
+
+    #[test]
+    fn a_later_next_revision_takes_the_date_away() {
+        let one = source(
+            "700005",
+            "20110310",
+            "99991231",
+            "일부개정",
+            "부칙\n이 조례는 공포일부터 시행한다.",
+        );
+        let next = source(
+            "700006",
+            "20110601",
+            "20110601",
+            "일부개정",
+            "부칙\n이 조례는 공포한 날부터 시행한다.",
+        );
+        let ledger = ledger(&[(
+            &one,
+            judged(
+                "promulgation_day",
+                "2011-03-10",
+                "이 조례는 공포일부터 시행한다.",
+            ),
+            None,
+        )]);
+        let built = plan(vec![one, next], &ledger);
+        let found = built.occurrence(0);
+        assert_eq!(found.status, "unresolved");
+        assert_eq!(found.date_evidence["date_withheld"], "llm-next-revision");
+        assert_eq!(
+            found.date_evidence["llm_not_applied"]["reason"],
+            "next-revision-changed"
+        );
+        assert_eq!(
+            found.date_evidence["llm_not_applied"]["actual_next_promulgation"],
+            "2011-06-01"
+        );
+    }
+
+    #[test]
+    fn an_llm_dated_repeal_changes_no_other_revision() {
+        // user-c2-llm-repeal-no-20261117: the repeal dated by the LLM is no confirmed repeal of the
+        // repeal-before-effective rule, so the earlier revision keeps its source date.
+        let earlier = source(
+            "700007",
+            "20240101",
+            "20241231",
+            "일부개정",
+            "부칙\n이 조례는 2024년 12월 31일부터 시행한다.",
+        );
+        let repeal = source(
+            "700008",
+            "20240601",
+            "99991231",
+            "폐지",
+            "부칙\n이 조례는 공포일부터 시행한다.",
+        );
+        let mut judgment = judged(
+            "promulgation_day",
+            "2024-06-01",
+            "이 조례는 공포일부터 시행한다.",
+        );
+        judgment.next = None;
+        let ledger = ledger(&[(&repeal, judgment, None)]);
+        let built = plan(vec![earlier, repeal], &ledger);
+        assert_eq!(built.occurrence(1).status, "llm");
+        let kept = built.occurrence(0);
+        assert_eq!(
+            (kept.status.as_str(), kept.enforcement_date.as_deref()),
+            ("confirmed", Some("2024-12-31"))
+        );
+    }
+
+    #[test]
+    fn copies_with_and_without_an_llm_date_are_held() {
+        // Two copies of one revision: only one has a usable judgment. The copy with the LLM date
+        // is held with the LLM mark; the other copy stays as the parser left it (unresolved).
+        let one = source(
+            "700009",
+            "20110310",
+            "99991231",
+            "일부개정",
+            "부칙\n이 조례는 공포일부터 시행한다.",
+        );
+        let mut other = one.clone();
+        other.xml.extend_from_slice(b"\n");
+        let ledger = ledger(&[(
+            &one,
+            judged(
+                "promulgation_day",
+                "2011-03-10",
+                "이 조례는 공포일부터 시행한다.",
+            ),
+            None,
+        )]);
+        let built = plan(vec![one, other], &ledger);
+        let judged_copy = built.occurrence(0);
+        assert_eq!(judged_copy.status, "unresolved");
+        assert_eq!(
+            judged_copy.date_evidence["date_withheld"],
+            "llm-copy-mismatch"
+        );
+        assert!(!judged_copy.date_evidence["llm_judgment"].is_null());
+        let plain = built.occurrence(1);
+        assert_eq!(
+            (plain.status.as_str(), plain.enforcement_date.as_deref()),
+            ("unresolved", None)
+        );
+        assert!(plain.date_evidence["llm_judgment"].is_null());
+    }
+
+    #[test]
+    fn without_a_ledger_nothing_changes() {
+        let one = source(
+            "700010",
+            "20110310",
+            "99991231",
+            "일부개정",
+            "부칙\n이 조례는 공포일부터 시행한다.",
+        );
+        let plain = DatePlan::new("ordinances", true, vec![one.clone()]).unwrap();
+        let with = DatePlan::new_with("ordinances", true, vec![one], None).unwrap();
+        assert_eq!(
+            serde_json::to_value(&plain.revisions).unwrap(),
+            serde_json::to_value(&with.revisions).unwrap()
+        );
+        assert!(plain.llm.is_none() && with.llm.is_none());
     }
 }

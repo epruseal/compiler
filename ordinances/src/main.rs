@@ -9,6 +9,7 @@ use clap::Parser;
 use git_writer::date_index::{
     DatePlan, PATH_REVISION_PREFIX, SourceRevision, repeal_and_enact_is_repeal,
 };
+use git_writer::llm_ledger::LlmLedger;
 use git_writer::{
     BareRepoWriter, GitTimestampKst, PreparedBlob, RepoPathBuf, escape_accidental_markdown_links,
     hex, precompute_blob,
@@ -58,6 +59,11 @@ struct Cli {
     /// Backward-compatible no-op: bare repository output is now the default.
     #[arg(long = "bare", hide = true, conflicts_with = "tree")]
     _bare: bool,
+    /// Operations folder of the LLM effective-date judgment (compiler#2). The enforcement basis
+    /// reads `<dir>/ledger/<dataset>.json` and uses its usable judgments as a second approval
+    /// source. Other modes refuse it.
+    #[arg(long)]
+    llm_ledger: Option<PathBuf>,
 }
 
 /// Minimal build manifest shared by non-law compilers.
@@ -156,6 +162,9 @@ fn main() -> Result<()> {
 
 /// Executes the requested compiler mode.
 fn run(cli: Cli) -> Result<()> {
+    if cli.llm_ledger.is_some() && cli.commit_date_basis != CommitDateBasis::Enforcement {
+        anyhow::bail!("--llm-ledger requires --commit-date-basis enforcement");
+    }
     if cli.commit_date_basis == CommitDateBasis::Enforcement {
         let manifest = cli
             .manifest
@@ -169,11 +178,17 @@ fn run(cli: Cli) -> Result<()> {
         } else {
             DatePlan::check_destination(&cli.output, Some(manifest), true)?
         };
-        let mut dates = DatePlan::from_sources(
+        let ledger = cli
+            .llm_ledger
+            .as_deref()
+            .map(|ops| LlmLedger::read(ops, "ordinances"))
+            .transpose()?;
+        let mut dates = DatePlan::from_sources_with(
             "ordinances",
             true,
             date_sources(&cli.cache_dir, cli.limit)?,
             false,
+            ledger.as_ref(),
         )?;
         if cli.validate {
             // The plan above has checked every date. The manifest has no date index.

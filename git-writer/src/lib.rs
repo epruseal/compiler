@@ -21,6 +21,9 @@ use smallvec::SmallVec;
 /// Plans date events and preserves source revisions for date queries.
 pub mod date_index;
 
+/// Reads the LLM effective-date judgment ledger of compiler#2.
+pub mod llm_ledger;
+
 /// Supported pack entry kinds emitted by the handcrafted writer.
 #[repr(u8)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

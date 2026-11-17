@@ -10,6 +10,7 @@ use std::sync::OnceLock;
 use anyhow::{Context, Result, ensure};
 use clap::Parser;
 use git_writer::date_index::{DatePlan, SourceRevision};
+use git_writer::llm_ledger::LlmLedger;
 use git_writer::{
     BareRepoWriter, GitTimestampKst, PreparedBlob, RepoPathBuf, escape_accidental_markdown_links,
     hex, precompute_blob,
@@ -63,6 +64,11 @@ struct Cli {
     /// Backward-compatible no-op: bare repository output is now the default.
     #[arg(long = "bare", hide = true, conflicts_with = "tree")]
     _bare: bool,
+    /// Operations folder of the LLM effective-date judgment (compiler#2). The enforcement basis
+    /// reads `<dir>/ledger/<dataset>.json` and uses its usable judgments as a second approval
+    /// source. Other modes refuse it.
+    #[arg(long)]
+    llm_ledger: Option<PathBuf>,
 }
 
 /// Minimal build manifest shared by non-law compilers.
@@ -192,6 +198,9 @@ fn main() -> Result<()> {
 
 /// Executes the requested compiler mode.
 fn run(cli: Cli) -> Result<()> {
+    if cli.llm_ledger.is_some() && cli.commit_date_basis != CommitDateBasis::Enforcement {
+        anyhow::bail!("--llm-ledger requires --commit-date-basis enforcement");
+    }
     if cli.commit_date_basis == CommitDateBasis::Enforcement {
         let manifest = cli
             .manifest
@@ -206,11 +215,17 @@ fn run(cli: Cli) -> Result<()> {
             DatePlan::check_destination(&cli.output, Some(manifest), true)?
         };
         let skipped = SkippedSources::default();
-        let mut dates = DatePlan::from_sources(
+        let ledger = cli
+            .llm_ledger
+            .as_deref()
+            .map(|ops| LlmLedger::read(ops, "admrules"))
+            .transpose()?;
+        let mut dates = DatePlan::from_sources_with(
             "admrules",
             true,
             date_sources(&cli.cache_dir, cli.limit, skipped.clone())?,
             false,
+            ledger.as_ref(),
         )?;
         record_skipped(&mut dates, &skipped);
         if cli.validate {
