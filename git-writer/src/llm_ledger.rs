@@ -199,7 +199,7 @@ impl LlmLedger {
             .any(|(_, named, _)| named == revision)
     }
 
-    /// The number of usable judgments.
+    /// The number of usable judgments (cross-checks are not counted; see `is_empty`).
     pub fn len(&self) -> usize {
         self.entries.len()
     }

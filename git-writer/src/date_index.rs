@@ -7782,11 +7782,11 @@ impl DatePlan {
         }
     }
 
-    /// The gate of every revision group (see `Occurrence::apply_gate`), after the processing of the
-    /// plan that gives each revision its state (the cap of `defer_late_label_dates`), so each result
-    /// that the earlier processing made keeps its own evidence. The repeal rule and the LLM steps
-    /// come after it. The first occurrence of a revision stands for the revision, as in
-    /// `defer_late_label_dates`.
+    /// The gate of every revision group (see `Occurrence::apply_gate`), after the cap of
+    /// `defer_late_label_dates` and `check_llm_next_revisions`, so each result that the earlier
+    /// processing made keeps its own evidence. The repeal rule, `mark_llm_dates` and
+    /// `check_llm_cross` come after it. The first occurrence of a revision stands for the revision,
+    /// as in `defer_late_label_dates`.
     fn apply_gate(&mut self) {
         // The unit is the revision, whatever the number of its copies: copies of one revision
         // (the same identity and revision, content that differs) get the same result. One copy that
