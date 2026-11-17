@@ -309,6 +309,11 @@ pub struct BareRepoWriter {
 }
 
 impl BareRepoWriter {
+    /// Returns the last commit without finalizing the repository.
+    pub fn head_commit(&self) -> Option<[u8; 20]> {
+        self.parent_commit
+    }
+
     /// Creates a new temporary bare repository writer for the requested output path.
     pub fn create(output: &Path) -> Result<Self> {
         let final_output = output.to_path_buf();

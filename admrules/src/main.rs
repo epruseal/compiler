@@ -1,12 +1,15 @@
 //! Compile cached law.go.kr administrative-rule XML into a bare Git repository.
 
+use std::cell::RefCell;
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::rc::Rc;
 use std::sync::OnceLock;
 
 use anyhow::{Context, Result, ensure};
 use clap::Parser;
+use git_writer::date_index::{DatePlan, SourceRevision};
 use git_writer::{
     BareRepoWriter, GitTimestampKst, PreparedBlob, RepoPathBuf, escape_accidental_markdown_links,
     hex, precompute_blob,
@@ -20,6 +23,15 @@ use unicode_normalization::UnicodeNormalization;
 const REPOSITORY_README: &[u8] = include_bytes!("../assets/README.md");
 const ORGANIZATION_AUTHORITY_YAML: &str = include_str!("../assets/organization_authority.yaml");
 static ORGANIZATION_AUTHORITY: OnceLock<OrganizationAuthority> = OnceLock::new();
+
+/// Selects the date used for repository history.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, clap::ValueEnum)]
+enum CommitDateBasis {
+    /// Preserve the existing issue-date history.
+    Promulgation,
+    /// Replay revisions by their approved effective dates.
+    Enforcement,
+}
 
 /// Command-line interface.
 #[derive(Debug, Parser)]
@@ -39,6 +51,9 @@ struct Cli {
     /// Emit build manifest JSON to this path. Default: no manifest.
     #[arg(long)]
     manifest: Option<PathBuf>,
+    /// Select the date used for repository history.
+    #[arg(long, value_enum, default_value_t = CommitDateBasis::Promulgation)]
+    commit_date_basis: CommitDateBasis,
     /// Limit input files for probe runs.
     #[arg(long)]
     limit: Option<usize>,
@@ -177,6 +192,49 @@ fn main() -> Result<()> {
 
 /// Executes the requested compiler mode.
 fn run(cli: Cli) -> Result<()> {
+    if cli.commit_date_basis == CommitDateBasis::Enforcement {
+        let manifest = cli
+            .manifest
+            .as_deref()
+            .context("--commit-date-basis enforcement requires --manifest <path>")?;
+        if cli.tree {
+            anyhow::bail!("enforcement requires bare repository output");
+        }
+        let destination = if cli.validate {
+            manifest.to_path_buf()
+        } else {
+            DatePlan::check_destination(&cli.output, Some(manifest), true)?
+        };
+        let skipped = SkippedSources::default();
+        let mut dates = DatePlan::from_sources(
+            "admrules",
+            true,
+            date_sources(&cli.cache_dir, cli.limit, skipped.clone())?,
+            false,
+        )?;
+        record_skipped(&mut dates, &skipped);
+        if cli.validate {
+            // The plan above has checked every date. The manifest has no date index.
+            let report = serde_json::json!({"schema_version":1, "head_commit_sha":""});
+            println!("{}", serde_json::to_string_pretty(&report)?);
+            anyhow::ensure!(
+                !destination.exists(),
+                "date index already exists: {}",
+                destination.display()
+            );
+            fs::write(&destination, serde_json::to_string_pretty(&report)?).with_context(|| {
+                format!("failed to write manifest to {}", destination.display())
+            })?;
+            return Ok(());
+        }
+        let (head, staged) = dates.replay(&cli.output, REPOSITORY_README)?;
+        return dates.publish_enforcement(
+            staged,
+            &head,
+            &destination,
+            serde_json::json!({"schema_version":1,"head_commit_sha":head}),
+        );
+    }
     if cli.validate {
         validate_cache(&cli.cache_dir, cli.limit, cli.manifest.as_deref())
     } else if cli.tree {
@@ -186,7 +244,33 @@ fn run(cli: Cli) -> Result<()> {
                 path.display()
             );
         }
-        compile_dir(&cli.cache_dir, &cli.output, cli.limit)
+        // A new output path receives its README before input planning, as before.
+        // An existing output stays untouched until planning succeeds.
+        if !cli.output.exists() {
+            fs::create_dir_all(&cli.output)
+                .with_context(|| format!("failed to create {}", cli.output.display()))?;
+            fs::write(cli.output.join("README.md"), REPOSITORY_README)?;
+        }
+        let (entries, snapshot_applied) =
+            render_admrule_entries_with_snapshot(&cli.cache_dir, cli.limit)?;
+        let destination = DatePlan::check_destination(&cli.output, None, false)?;
+        let skipped = SkippedSources::default();
+        let mut dates = DatePlan::from_sources(
+            "admrules",
+            false,
+            date_sources(&cli.cache_dir, cli.limit, skipped.clone())?,
+            false,
+        )?;
+        record_skipped(&mut dates, &skipped);
+        // The old index goes only after the tree is written, so a failed write keeps it.
+        write_tree(&entries, &cli.output)?;
+        DatePlan::discard_stale_index(&destination)?;
+        dates.publish(
+            None,
+            "",
+            &destination,
+            serde_json::json!({"schema_version":1,"head_commit_sha":"", "current_snapshot_applied":snapshot_applied}),
+        )
     } else {
         compile_bare_repo_with_manifest(
             &cli.cache_dir,
@@ -210,13 +294,22 @@ fn compile_bare_repo_with_manifest(
     limit: Option<usize>,
     manifest: Option<&Path>,
 ) -> Result<()> {
-    let entries = render_admrule_entries(cache_dir, limit)?;
+    let (entries, snapshot_applied) = render_admrule_entries_with_snapshot(cache_dir, limit)?;
     if entries.is_empty() {
         anyhow::bail!(
             "no valid admrule XML files found under {}",
             cache_dir.display()
         );
     }
+    let destination = DatePlan::check_destination(output, manifest, false)?;
+    let skipped = SkippedSources::default();
+    let mut dates = DatePlan::from_sources(
+        "admrules",
+        false,
+        date_sources(cache_dir, limit, skipped.clone())?,
+        false,
+    )?;
+    record_skipped(&mut dates, &skipped);
 
     let mut repo = BareRepoWriter::create(output)?;
     repo.commit_static(
@@ -255,6 +348,7 @@ fn compile_bare_repo_with_manifest(
                 GitTimestampKst::from_epoch(entry.timestamp),
             )?;
         }
+        dates.record_body(&entry.path, &entry.content, repo.head_commit().unwrap());
         if entry.delete_after_write {
             repo.commit_bot_deletions(
                 &[RepoPathBuf::file(&entry.path)],
@@ -264,18 +358,113 @@ fn compile_bare_repo_with_manifest(
         }
     }
     let head_sha = repo.finish()?;
-    if let Some(path) = manifest {
-        write_manifest(
-            path,
-            &BuildManifest {
-                schema_version: 1,
-                head_commit_sha: hex(&head_sha),
-                entries_total: entries.len(),
-            },
-        )?;
-    }
+    let head = hex(&head_sha);
+    DatePlan::discard_stale_index(&destination)?;
+    let mut manifest = serde_json::to_value(BuildManifest {
+        schema_version: 1,
+        head_commit_sha: head.clone(),
+        entries_total: entries.len(),
+    })?;
+    manifest["current_snapshot_applied"] = snapshot_applied.into();
+    dates.publish(Some(output), &head, &destination, manifest)?;
     eprintln!("committed {} admrule revisions", entries.len());
     Ok(())
+}
+
+/// Source copies left out of the date index because they could not be parsed: the path under
+/// the cache and the error text.
+type SkippedSources = Rc<RefCell<Vec<(String, String)>>>;
+
+/// Moves the skipped source copies into the date plan, so the index reports them.
+fn record_skipped(dates: &mut DatePlan, skipped: &SkippedSources) {
+    for (file, error) in skipped.borrow().iter() {
+        dates.record_unparsable(file, error);
+    }
+}
+
+/// Collects active and archived occurrences without source-current correction.
+///
+/// An archived copy with the same name as an active copy was never read by the original build.
+/// If such a copy cannot be parsed, it is left out of the index and recorded in `skipped`. Any
+/// other unparsable source stops the build, as it did before.
+fn date_sources(
+    cache: &Path,
+    limit: Option<usize>,
+    skipped: SkippedSources,
+) -> Result<impl Iterator<Item = Result<SourceRevision>> + use<'_>> {
+    let mut selected = read_xml_files(cache)?;
+    if let Some(limit) = limit {
+        selected.truncate(limit);
+    }
+    let mut files: Vec<(PathBuf, bool)> =
+        selected.iter().map(|path| (path.clone(), false)).collect();
+    if limit.is_none() && cache.join("retired").is_dir() {
+        let mut retired = fs::read_dir(cache.join("retired"))?
+            .map(|item| item.map(|item| item.path()))
+            .collect::<std::io::Result<Vec<_>>>()?;
+        retired.sort();
+        for path in retired {
+            if path.extension().and_then(|extension| extension.to_str()) == Some("xml")
+                && !selected.contains(&path)
+            {
+                files.push((path, true));
+            }
+        }
+    }
+    let mut registry = PathRegistry::new();
+    let mut paths = BTreeMap::new();
+    Ok(files.into_iter().filter_map(move |(path, shadowed)| {
+        let loaded = load_admrule(
+            &path,
+            path.file_stem()
+                .and_then(|stem| stem.to_str())
+                .unwrap_or(""),
+        );
+        let (xml, rule) = match loaded {
+            Ok(found) => found,
+            Err(error) if shadowed => {
+                let file = path.strip_prefix(cache).map_or_else(
+                    |_| path.display().to_string(),
+                    |rel| rel.to_string_lossy().into_owned(),
+                );
+                skipped
+                    .borrow_mut()
+                    .push((file, error.root_cause().to_string()));
+                return None;
+            }
+            Err(error) => return Some(Err(error)),
+        };
+        Some((|| -> Result<SourceRevision> {
+            let key = (rule.identity().to_owned(), rule.serial.clone());
+            let canonical_path = paths
+                .entry(key)
+                .or_insert_with(|| {
+                    admrule_path(&rule, &mut registry)
+                        .to_string_lossy()
+                        .replace('\\', "/")
+                })
+                .clone();
+            Ok(SourceRevision {
+                identity: rule.identity().to_owned(),
+                revision: rule.serial.clone(),
+                name: rule.name.clone(),
+                category: rule.rule_type.clone(),
+                canonical_path,
+                source_path: path.strip_prefix(cache)?.to_string_lossy().into_owned(),
+                xml,
+                promulgation: rule.issue_date_raw.clone(),
+                enforcement: rule.effective_date_raw.clone(),
+                amendment: rule.amendment.clone(),
+                repeal: rule.is_repeal(),
+                markdown: render_markdown(&rule).into_bytes(),
+                secondary_name: String::new(),
+                secondary_number: 0,
+                serial: rule.serial.parse().unwrap_or(u64::MAX),
+                copy_priority: 0,
+                copy_conflict: None,
+            })
+        })())
+    }))
 }
 
 /// Scans input cache and emits a JSON validation report without writing output.
@@ -290,6 +479,7 @@ fn validate_cache(cache_dir: &Path, limit: Option<usize>, manifest: Option<&Path
     let json = serde_json::to_string_pretty(&report)
         .context("failed to serialize validation report as JSON")?;
     println!("{json}");
+    // A validation run builds no repository, so its manifest has no date index.
     if let Some(path) = manifest {
         write_manifest(
             path,
@@ -302,7 +492,6 @@ fn validate_cache(cache_dir: &Path, limit: Option<usize>, manifest: Option<&Path
     }
     Ok(())
 }
-
 /// Writes a pretty-printed manifest JSON payload.
 fn write_manifest(path: &Path, manifest: &BuildManifest) -> Result<()> {
     let json = serde_json::to_string_pretty(manifest)
@@ -354,7 +543,27 @@ impl XmlNode {
     }
 }
 
+/// Reads and parses XML with its source path and cause chain.
+fn load_admrule(path: &Path, fallback: &str) -> Result<(Vec<u8>, Admrule)> {
+    let raw = fs::read(path).map_err(|source| {
+        let message = format!("failed to read {}: {source}", path.display());
+        anyhow::Error::new(source).context(message)
+    })?;
+    let parsed = parse_admrule(&raw, fallback).map_err(|source| {
+        let message = format!("failed to parse admrule XML {}: {source}", path.display());
+        source.context(message)
+    })?;
+    Ok((raw, parsed))
+}
+
 fn render_admrule_entries(cache_dir: &Path, limit: Option<usize>) -> Result<Vec<ImportEntry>> {
+    render_admrule_entries_with_snapshot(cache_dir, limit).map(|(entries, _)| entries)
+}
+
+fn render_admrule_entries_with_snapshot(
+    cache_dir: &Path,
+    limit: Option<usize>,
+) -> Result<(Vec<ImportEntry>, bool)> {
     let mut files = read_xml_files(cache_dir)?;
     if let Some(limit) = limit {
         files.truncate(limit);
@@ -362,9 +571,8 @@ fn render_admrule_entries(cache_dir: &Path, limit: Option<usize>) -> Result<Vec<
     let mut registry = PathRegistry::new();
     let mut entries = Vec::with_capacity(files.len());
     for path in files {
-        let raw = fs::read(&path).with_context(|| format!("failed to read {}", path.display()))?;
-        let rule = parse_admrule(
-            &raw,
+        let (_, rule) = load_admrule(
+            &path,
             path.file_stem().and_then(|s| s.to_str()).unwrap_or(""),
         )?;
         let rel = admrule_path(&rule, &mut registry);
@@ -390,11 +598,13 @@ fn render_admrule_entries(cache_dir: &Path, limit: Option<usize>) -> Result<Vec<
             .then_with(|| a.path.cmp(&b.path))
     });
     mark_final_state_deletions(&mut entries);
+    let before_snapshot = entries.len();
     if limit.is_none() {
         append_current_snapshot(cache_dir, &mut entries)?;
     }
+    let snapshot_applied = entries.len() > before_snapshot;
     assign_previous_paths(&mut entries);
-    Ok(entries)
+    Ok((entries, snapshot_applied))
 }
 
 #[derive(Deserialize)]
@@ -412,7 +622,17 @@ fn append_current_snapshot(cache_dir: &Path, entries: &mut Vec<ImportEntry>) -> 
     if !snapshot_path.exists() {
         return Ok(());
     }
-    let snapshot: CurrentSnapshot = serde_json::from_slice(&fs::read(snapshot_path)?)?;
+    let snapshot_raw = fs::read(&snapshot_path).map_err(|source| {
+        let message = format!("failed to read {}: {source}", snapshot_path.display());
+        anyhow::Error::new(source).context(message)
+    })?;
+    let snapshot: CurrentSnapshot = serde_json::from_slice(&snapshot_raw).map_err(|source| {
+        let message = format!(
+            "failed to parse current snapshot {}: {source}",
+            snapshot_path.display()
+        );
+        anyhow::Error::new(source).context(message)
+    })?;
     ensure!(
         snapshot.schema_version == 1 && !snapshot.rules.is_empty(),
         "invalid current admrule snapshot"
@@ -454,9 +674,10 @@ fn append_current_snapshot(cache_dir: &Path, entries: &mut Vec<ImportEntry>) -> 
         } else {
             cache_dir.join("retired").join(format!("{serial}.xml"))
         };
-        let raw = fs::read(detail)
-            .with_context(|| format!("missing current snapshot detail: {identity}/{serial}"))?;
-        let rule = parse_admrule(&raw, serial)?;
+        let (_, rule) = load_admrule(&detail, serial).map_err(|source| {
+            let message = format!("missing current snapshot detail: {identity}/{serial}: {source}");
+            source.context(message)
+        })?;
         ensure!(
             rule.identity() == identity && &rule.serial == serial,
             "snapshot identity mismatch: {identity}/{serial}"
@@ -619,11 +840,16 @@ fn commit_timestamp(raw: &str) -> Result<i64> {
 }
 
 /// Compile every XML file under `cache_dir` into `output`.
+#[cfg(test)]
 fn compile_dir(cache_dir: &Path, output: &Path, limit: Option<usize>) -> Result<()> {
+    write_tree(&render_admrule_entries(cache_dir, limit)?, output)
+}
+
+/// Writes already rendered entries as a Markdown tree.
+fn write_tree(entries: &[ImportEntry], output: &Path) -> Result<()> {
     fs::create_dir_all(output).with_context(|| format!("failed to create {}", output.display()))?;
     fs::write(output.join("README.md"), REPOSITORY_README)?;
-    let entries = render_admrule_entries(cache_dir, limit)?;
-    for entry in &entries {
+    for entry in entries {
         if entry.delete_only {
             if let Some(previous_path) = &entry.previous_path {
                 let previous = output.join(previous_path);
@@ -2692,6 +2918,77 @@ mod tests {
             output.status.success(),
             "{}",
             String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
+    fn snapshot_cache(temp: &Path) -> PathBuf {
+        let cache = temp.join("cache");
+        fs::create_dir(&cache).unwrap();
+        fs::write(
+            cache.join("current_snapshot.json"),
+            r#"{"schema_version":1,"observed_on":"2026-01-01","rules":{"R-1":"555"}}"#,
+        )
+        .unwrap();
+        cache
+    }
+
+    /// Mirrors the `fn main() -> Result<()>` failure output of the CLI.
+    fn cli_error_output(error: &anyhow::Error) -> String {
+        format!("Error: {error:?}")
+    }
+
+    #[test]
+    fn snapshot_detail_read_failure_keeps_identity_path_and_cause() {
+        let temp = tempfile::tempdir().unwrap();
+        let cache = snapshot_cache(temp.path());
+        let detail = cache.join("retired").join("555.xml");
+        let cause = fs::read(&detail).unwrap_err();
+
+        let error = append_current_snapshot(&cache, &mut Vec::new()).unwrap_err();
+        let text = error.to_string();
+        assert!(
+            text.contains("missing current snapshot detail: R-1/555"),
+            "{text}"
+        );
+        assert!(text.contains(&detail.display().to_string()), "{text}");
+        assert!(text.contains(&cause.to_string()), "{text}");
+        let source = error.chain().last().unwrap();
+        assert!(source.is::<std::io::Error>());
+        assert_eq!(source.to_string(), cause.to_string());
+        let cli = cli_error_output(&error);
+        assert!(
+            cli.contains(&cause.to_string()) && cli.contains("Caused by"),
+            "{cli}"
+        );
+    }
+
+    #[test]
+    fn snapshot_detail_parse_failure_keeps_identity_path_and_cause() {
+        let temp = tempfile::tempdir().unwrap();
+        let cache = snapshot_cache(temp.path());
+        let detail = cache.join("555.xml");
+        fs::write(&detail, "<AdmRulService><").unwrap();
+        let cause = parse_admrule(b"<AdmRulService><", "555").unwrap_err();
+
+        let error = append_current_snapshot(&cache, &mut Vec::new()).unwrap_err();
+        let text = error.to_string();
+        assert!(
+            text.contains("missing current snapshot detail: R-1/555"),
+            "{text}"
+        );
+        assert!(text.contains("failed to parse admrule XML"), "{text}");
+        assert!(text.contains(&detail.display().to_string()), "{text}");
+        assert!(text.contains(&cause.to_string()), "{text}");
+        assert!(
+            error
+                .chain()
+                .any(|link| link.to_string() == cause.to_string()),
+            "cause missing from chain"
+        );
+        let cli = cli_error_output(&error);
+        assert!(
+            cli.contains(&cause.to_string()) && cli.contains("Caused by"),
+            "{cli}"
         );
     }
 

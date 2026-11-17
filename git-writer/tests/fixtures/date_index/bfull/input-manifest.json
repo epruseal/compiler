@@ -1,0 +1,17 @@
+{
+  "generalref_nel_ls": {
+    "path": "generalref_nel_ls.xml",
+    "sha256": "b4ec8f88b2b23b0b3632de6a470ed5afbbaa94a81264484227fa260e38042024",
+    "purpose": "NEL and LS as character references in a body Text: GeneralRef pieces that stay payload characters"
+  },
+  "ps_cr_nbsp_text": {
+    "path": "ps_cr_nbsp_text.xml",
+    "sha256": "bdf8422690bbf49dda1db8949d4ed604a1f5710bbc4b1d394ee668c18e3f0803",
+    "purpose": "U+2029 and CR followed by NBSP as raw bytes in a body Text"
+  },
+  "ps_cr_nbsp_cdata": {
+    "path": "ps_cr_nbsp_cdata.xml",
+    "sha256": "2c60d400d32f7b8ca470d4960dadbcd6dfedfe8122317d50cc58708c3a2a1ba9",
+    "purpose": "U+2029 and CR followed by NBSP as raw bytes in an addendum CDATA"
+  }
+}

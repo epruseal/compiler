@@ -18,6 +18,9 @@ use crc32fast::Hasher as Crc32Hasher;
 use sha1::{Digest, Sha1};
 use smallvec::SmallVec;
 
+/// Plans date events and preserves source revisions for date queries.
+pub mod date_index;
+
 /// Supported pack entry kinds emitted by the handcrafted writer.
 #[repr(u8)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -97,6 +100,33 @@ impl GitTimestampKst {
     pub fn from_epoch(epoch: i64) -> Self {
         Self { epoch }
     }
+}
+
+/// Maps items on all available cores and returns the results in input order.
+///
+/// Each worker takes one contiguous slice, so the order never depends on thread timing.
+pub fn parallel_map<T: Sync, R: Send>(items: &[T], map: impl Fn(&T) -> R + Sync) -> Vec<R> {
+    let workers = std::thread::available_parallelism()
+        .map_or(1, std::num::NonZeroUsize::get)
+        .min(items.len())
+        .max(1);
+    let size = items.len().div_ceil(workers).max(1);
+    std::thread::scope(|scope| {
+        let map = &map;
+        let handles: Vec<_> = items
+            .chunks(size)
+            .map(|chunk| scope.spawn(move || chunk.iter().map(map).collect::<Vec<R>>()))
+            .collect();
+        handles
+            .into_iter()
+            .flat_map(|handle| handle.join().expect("parallel map worker panicked"))
+            .collect()
+    })
+}
+
+/// Computes only the canonical blob id, without compressing the body.
+pub fn blob_id(content: &[u8]) -> [u8; 20] {
+    git_hash(PackObjectKind::Blob.git_type_name(), content)
 }
 
 /// Precomputes the canonical blob id and compressed pack payload for one file body.
@@ -459,6 +489,29 @@ pub struct BareRepoWriter {
 }
 
 impl BareRepoWriter {
+    /// Returns the last commit without finalizing the repository.
+    pub fn head_commit(&self) -> Option<[u8; 20]> {
+        self.parent_commit
+    }
+
+    /// Appends the historical contributor marker to the current tree.
+    pub fn commit_initial_contributor(&mut self, epoch: i64) -> Result<()> {
+        let author = GitPerson {
+            name: "Jihyeon Kim",
+            email: "simnalamburt@gmail.com",
+        };
+        let tree = self.root.materialize(&mut self.writer)?;
+        let sha = self.write_commit(
+            tree,
+            "Add @simnalamburt as a contributor",
+            author,
+            author,
+            GitTimestampKst::from_epoch(epoch),
+        )?;
+        self.parent_commit = Some(sha);
+        Ok(())
+    }
+
     /// Creates a new temporary bare repository writer for the requested output path.
     pub fn create(output: &Path) -> Result<Self> {
         let final_output = output.to_path_buf();
@@ -487,6 +540,60 @@ impl BareRepoWriter {
             root: TreeNode::default(),
             parent_commit: None,
         })
+    }
+
+    /// Creates an enforcement writer and exclusively reserves its sibling staging directory.
+    pub fn create_exclusive(output: &Path) -> Result<Self> {
+        let temp_output = sibling_temp_path(output, "tmp")?;
+        fs::create_dir(&temp_output)
+            .with_context(|| format!("failed to reserve {}", temp_output.display()))?;
+        let result = (|| -> Result<Self> {
+            let pack_path = temp_output.join("objects/pack/tmp_pack.pack");
+            fs::create_dir_all(pack_path.parent().context("pack path has no parent")?)?;
+            Ok(Self {
+                writer: PackWriter::new(&pack_path)?,
+                temp_output: temp_output.clone(),
+                final_output: output.to_path_buf(),
+                root: TreeNode::default(),
+                parent_commit: None,
+            })
+        })();
+        if result.is_err() {
+            fs::remove_dir_all(&temp_output).with_context(|| {
+                format!(
+                    "failed to recover staging directory {}",
+                    temp_output.display()
+                )
+            })?;
+        }
+        result
+    }
+
+    /// Returns the staging path used by an enforcement writer.
+    pub fn staging_path(output: &Path) -> Result<PathBuf> {
+        sibling_temp_path(output, "tmp")
+    }
+
+    /// Seals an enforcement repository without placing it at the final path.
+    pub fn seal(mut self) -> Result<([u8; 20], PathBuf)> {
+        self.writer.finish()?;
+        if let Some(parent_commit) = self.parent_commit {
+            let refs_heads = self.temp_output.join("refs/heads");
+            fs::create_dir_all(&refs_heads)
+                .with_context(|| format!("failed to create {}", refs_heads.display()))?;
+            fs::write(
+                refs_heads.join("main"),
+                format!("{}\n", hex(&parent_commit)),
+            )
+            .with_context(|| format!("failed to write {}", refs_heads.join("main").display()))?;
+        }
+        fs::write(self.temp_output.join("HEAD"), "ref: refs/heads/main\n").with_context(|| {
+            format!(
+                "failed to write {}",
+                self.temp_output.join("HEAD").display()
+            )
+        })?;
+        Ok((self.parent_commit.unwrap_or([0u8; 20]), self.temp_output))
     }
 
     /// Commits one rendered generated Markdown file using bot authorship.
@@ -532,6 +639,30 @@ impl BareRepoWriter {
             path,
             blob,
             stale_paths,
+            message,
+            CommitPeople {
+                author: bot,
+                committer: bot,
+            },
+            time,
+        )
+    }
+
+    /// Commits several generated files in one commit using bot authorship.
+    pub fn commit_bot_files(
+        &mut self,
+        files: &[(RepoPathBuf, PreparedBlob<'_>)],
+        message: &str,
+        time: GitTimestampKst,
+    ) -> Result<()> {
+        let bot = GitPerson {
+            name: "legalize-kr-bot",
+            email: "bot@legalize.kr",
+        };
+        let files: Vec<_> = files.iter().map(|(path, blob)| (path, blob)).collect();
+        self.commit_files_with_deletions(
+            &files,
+            &[],
             message,
             CommitPeople {
                 author: bot,
@@ -677,22 +808,41 @@ impl BareRepoWriter {
         people: CommitPeople<'_>,
         time: GitTimestampKst,
     ) -> Result<()> {
-        let components = validate_path(path.as_str())?;
+        self.commit_files_with_deletions(&[(path, &blob)], stale_paths, message, people, time)
+    }
+
+    /// Commits several file changes in one commit after deleting stale paths.
+    fn commit_files_with_deletions(
+        &mut self,
+        files: &[(&RepoPathBuf, &PreparedBlob<'_>)],
+        stale_paths: &[RepoPathBuf],
+        message: &str,
+        people: CommitPeople<'_>,
+        time: GitTimestampKst,
+    ) -> Result<()> {
+        let file_components = files
+            .iter()
+            .map(|(path, _)| validate_path(path.as_str()))
+            .collect::<Result<Vec<_>>>()?;
         let stale_components = stale_paths
             .iter()
             .map(|path| validate_path(path.as_str()))
             .collect::<Result<Vec<_>>>()?;
-        self.root.ensure_can_insert_file(&components)?;
+        for components in &file_components {
+            self.root.ensure_can_insert_file(components)?;
+        }
         for components in &stale_components {
             self.root.remove_file(components)?;
         }
-        self.writer.write_precompressed_object(
-            PackObjectKind::Blob,
-            blob.size,
-            blob.sha,
-            blob.compressed,
-        )?;
-        self.root.insert_file(&components, blob.sha)?;
+        for ((_, blob), components) in files.iter().zip(&file_components) {
+            self.writer.write_precompressed_object(
+                PackObjectKind::Blob,
+                blob.size,
+                blob.sha,
+                blob.compressed,
+            )?;
+            self.root.insert_file(components, blob.sha)?;
+        }
         let root_sha = self.root.materialize(&mut self.writer)?;
         let commit_sha =
             self.write_commit(root_sha, message, people.author, people.committer, time)?;

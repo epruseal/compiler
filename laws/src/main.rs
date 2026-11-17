@@ -20,6 +20,7 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
 use clap::Parser;
+use git_writer::date_index::{DatePlan, Prepared, SourceRevision};
 use rayon::prelude::*;
 use rustc_hash::FxHashMap as HashMap;
 use serde::Deserialize;
@@ -28,7 +29,9 @@ use crate::diagnostics::{
     BuildManifest, Diagnostics, OrphanRecord, UnparsableRecord, ValidationReport, write_manifest,
 };
 use crate::git_repo::{BareRepoWriter, GitTimestampKst, RepoPathBuf, hex, precompute_blob};
-use crate::render::{EntryKind, PathRegistry, build_commit_message, law_to_markdown};
+use crate::render::{
+    EntryKind, PathRegistry, build_commit_message, law_to_date_markdown, law_to_markdown,
+};
 use crate::xml_parser::{LawDetail, LawMetadata, parse_law_body, parse_metadata_only};
 
 /// Bundled README payload for the synthetic initial commit.
@@ -46,6 +49,15 @@ enum OnAnomaly {
     Warn,
     /// Exit with a non-zero status code when any anomaly is present.
     Fail,
+}
+
+/// Selects the date used for repository history.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, clap::ValueEnum)]
+enum CommitDateBasis {
+    /// Preserve the existing publication-date history.
+    Promulgation,
+    /// Replay revisions by their approved effective dates.
+    Enforcement,
 }
 
 /// Command-line interface for one-shot cache compilation.
@@ -79,6 +91,10 @@ struct Cli {
     /// Emit build manifest JSON to this path. Default: no manifest.
     #[arg(long)]
     manifest: Option<PathBuf>,
+
+    /// Select the date used for repository history.
+    #[arg(long, value_enum, default_value_t = CommitDateBasis::Promulgation)]
+    commit_date_basis: CommitDateBasis,
 }
 
 /// Amendment metadata loaded from cached history JSON.
@@ -117,6 +133,8 @@ struct Rendered {
     blob_sha: [u8; 20],
     /// Precompressed PACK payload for the rendered Markdown blob.
     compressed_blob: Vec<u8>,
+    /// SHA-256 of the rendered Markdown, computed by the render worker for the date index.
+    sha256: String,
     /// Commit message for this revision.
     message: String,
     /// Deterministic KST commit timestamp derived during pass 2.
@@ -129,6 +147,9 @@ struct Rendered {
  */
 /// Number of entries rendered per worker batch before the writer catches up.
 const CHUNK_SIZE: usize = 500;
+
+/// Entries read and rendered together for the date index; small so memory stays bounded.
+const DATE_CHUNK_SIZE: usize = 128;
 
 /// Parses CLI flags and runs the compiler.
 fn main() -> Result<()> {
@@ -404,6 +425,10 @@ fn plan_and_diagnose(cache_dir: &Path) -> Result<(Vec<PlannedEntry>, Diagnostics
 
 /// Executes the full two-pass cache-to-Git compilation pipeline.
 fn run(cli: Cli) -> Result<()> {
+    let enforcement = cli.commit_date_basis == CommitDateBasis::Enforcement;
+    if enforcement && cli.manifest.is_none() {
+        anyhow::bail!("--commit-date-basis enforcement requires --manifest <path>");
+    }
     //
     // Resolve `--strict` into the normalized anomaly policy so downstream checks only consult one.
     //
@@ -418,11 +443,41 @@ fn run(cli: Cli) -> Result<()> {
     let (entries, diagnostics) = plan_and_diagnose(&cli.cache_dir)?;
     let detail_dir = cli.cache_dir.join("detail");
 
+    let destination = if cli.validate {
+        cli.manifest.clone()
+    } else {
+        Some(DatePlan::check_destination(
+            &cli.output,
+            cli.manifest.as_deref(),
+            enforcement,
+        )?)
+    };
+    // The date plan reads every body. It runs after the original checks of a build (the empty
+    // input and `--expect-laws` guards), so those checks keep their order and exit codes. A
+    // plain `--validate` reports from the metadata plan alone, as before. An enforcement
+    // validation checks the dates before it reports, and writes no index.
+    let date_plan = || -> Result<DatePlan> {
+        // Sources are read, resolved and rendered in chunks, so memory stays bounded by one
+        // chunk. A validation index has no repository, so it keeps every body inline.
+        let keep_markdown = enforcement;
+        let render = !cli.validate;
+        let items = entries.chunks(DATE_CHUNK_SIZE).flat_map(|chunk| {
+            chunk
+                .par_iter()
+                .map(|entry| prepare_date_source(&cli.cache_dir, entry, keep_markdown, render))
+                .collect::<Vec<_>>()
+        });
+        DatePlan::from_prepared("laws", enforcement, items)
+    };
+
     //
     // `--validate` short-circuits before the entry-empty guard so operators can see an empty
     // cache as a structured report rather than an opaque error.
     //
     if cli.validate {
+        if enforcement {
+            date_plan()?;
+        }
         let report = ValidationReport {
             total_xml: diagnostics.total_xml,
             unparsable: &diagnostics.unparsable,
@@ -449,6 +504,14 @@ fn run(cli: Cli) -> Result<()> {
                 orphan_children: &diagnostics.orphan_children,
                 by_type: &diagnostics.by_type,
             };
+            // A validation run builds no repository, so its manifest has no date index.
+            if enforcement {
+                anyhow::ensure!(
+                    !path.exists(),
+                    "date index already exists: {}",
+                    path.display()
+                );
+            }
             write_manifest(path, &manifest)?;
         }
         return Ok(());
@@ -470,6 +533,30 @@ fn run(cli: Cli) -> Result<()> {
             entries.len()
         );
         std::process::exit(3);
+    }
+
+    let mut dates = date_plan()?;
+    if enforcement {
+        // Files without valid metadata are not entries. As in the default build, they are
+        // reported in the manifest and `--strict` turns them into an error at the end.
+        let (head, staged) = dates.replay(&cli.output, REPOSITORY_README)?;
+        let manifest = BuildManifest {
+            schema_version: 1,
+            head_commit_sha: head.clone(),
+            entries_total: entries.len(),
+            unparsable: &diagnostics.unparsable,
+            empty_metadata: &diagnostics.empty_metadata,
+            orphan_children: &diagnostics.orphan_children,
+            by_type: &diagnostics.by_type,
+        };
+        dates.publish_enforcement(
+            staged,
+            &head,
+            destination.as_deref().unwrap(),
+            serde_json::to_value(&manifest)?,
+        )?;
+        report_anomalies(on_anomaly, &diagnostics);
+        return Ok(());
     }
 
     //
@@ -539,6 +626,12 @@ fn run(cli: Cli) -> Result<()> {
                 &rendered.message,
                 rendered.time,
             )?;
+            dates.record_body_hashed(
+                &rendered.path.to_string(),
+                rendered.sha256.clone(),
+                rendered.blob_sha,
+                repo.head_commit().unwrap(),
+            );
             committed += 1;
             if committed.is_multiple_of(500) || committed == total {
                 eprintln!("  committed {committed}/{total}");
@@ -553,23 +646,30 @@ fn run(cli: Cli) -> Result<()> {
     eprintln!("4. Finalizing pack + index");
     let head_sha = repo.finish()?;
     let head_hex = hex(&head_sha);
-    if let Some(path) = &cli.manifest {
-        let manifest = BuildManifest {
-            schema_version: 1,
-            head_commit_sha: head_hex,
-            entries_total: entries.len(),
-            unparsable: &diagnostics.unparsable,
-            empty_metadata: &diagnostics.empty_metadata,
-            orphan_children: &diagnostics.orphan_children,
-            by_type: &diagnostics.by_type,
-        };
-        write_manifest(path, &manifest)?;
-    }
+    DatePlan::discard_stale_index(destination.as_deref().unwrap())?;
+    let manifest = BuildManifest {
+        schema_version: 1,
+        head_commit_sha: head_hex.clone(),
+        entries_total: entries.len(),
+        unparsable: &diagnostics.unparsable,
+        empty_metadata: &diagnostics.empty_metadata,
+        orphan_children: &diagnostics.orphan_children,
+        by_type: &diagnostics.by_type,
+    };
+    dates.publish(
+        Some(&cli.output),
+        &head_hex,
+        destination.as_deref().unwrap(),
+        serde_json::to_value(&manifest)?,
+    )?;
 
-    //
-    // Strict mode reports cumulative anomalies at the end so operators see the full picture
-    // even though the build itself completed.
-    //
+    report_anomalies(on_anomaly, &diagnostics);
+    Ok(())
+}
+
+/// Strict mode reports cumulative anomalies at the end so operators see the full picture
+/// even though the build itself completed.
+fn report_anomalies(on_anomaly: OnAnomaly, diagnostics: &Diagnostics) {
     if on_anomaly == OnAnomaly::Fail && !diagnostics.is_clean() {
         eprintln!(
             "strict: {} unparsable, {} empty-meta, {} orphans",
@@ -579,17 +679,98 @@ fn run(cli: Cli) -> Result<()> {
         );
         std::process::exit(2);
     }
-    Ok(())
+}
+
+/// Reads one planned source, resolves its dates and renders the body for the date index.
+fn prepare_date_source(
+    cache: &Path,
+    entry: &PlannedEntry,
+    keep_markdown: bool,
+    render: bool,
+) -> Result<(SourceRevision, Prepared)> {
+    let xml = read_law_xml(&entry.source_path)?;
+    let body = parse_law_body_at(&xml, &entry.source_path)?;
+    let metadata = &entry.metadata;
+    let source = SourceRevision {
+        identity: if metadata.law_id.is_empty() {
+            entry.mst.clone()
+        } else {
+            metadata.law_id.clone()
+        },
+        revision: entry.mst.clone(),
+        name: metadata.law_name.clone(),
+        category: metadata.law_type.clone(),
+        canonical_path: entry.path.to_string(),
+        source_path: entry
+            .source_path
+            .strip_prefix(cache)?
+            .to_string_lossy()
+            .into_owned(),
+        promulgation: metadata.promulgation_date.clone(),
+        enforcement: metadata.enforcement_date.clone(),
+        amendment: metadata.amendment.clone(),
+        repeal: matches!(metadata.amendment.as_str(), "폐지" | "타법폐지"),
+        markdown: Vec::new(),
+        xml,
+        secondary_name: metadata.law_name.clone(),
+        secondary_number: metadata.promulgation_number.parse().unwrap_or(u64::MAX),
+        serial: entry.mst.parse().unwrap_or(u64::MAX),
+        copy_priority: 0,
+        copy_conflict: None,
+    };
+    let mut prepared = Prepared::resolve("laws", &source);
+    let mut source = source;
+    // A validation run only checks the dates, so it renders no body.
+    let rendered = match prepared.occurrence().filter(|_| render) {
+        Some(occurrence) => {
+            let detail = LawDetail {
+                metadata: metadata.clone(),
+                articles: body.articles,
+                addenda: body.addenda,
+                attachments: body.attachments,
+            };
+            Some((
+                law_to_date_markdown(&detail, occurrence)?,
+                occurrence.has_plain_source_dates(),
+            ))
+        }
+        None => None,
+    };
+    if let Some((markdown, plain)) = rendered {
+        prepared = prepared.with_markdown_hash(&markdown);
+        // The default build commits this exact body when the dates are the source's own, so
+        // only its hash is kept. Bodies the date renderer changes keep their text.
+        source.markdown = if !keep_markdown && plain {
+            Vec::new()
+        } else {
+            markdown
+        };
+    }
+    Ok((source, prepared))
+}
+
+/// Reads source bytes with the original path in the error chain.
+fn read_law_xml(path: &Path) -> Result<Vec<u8>> {
+    fs::read(path).map_err(|source| {
+        let message = format!("failed to read {}: {source}", path.display());
+        anyhow::Error::new(source).context(message)
+    })
+}
+
+/// Parses a selected source with the original path in the error chain.
+fn parse_law_body_at(xml: &[u8], path: &Path) -> Result<crate::xml_parser::LawBody> {
+    parse_law_body(xml).map_err(|source| {
+        let message = format!("failed to parse {}: {source}", path.display());
+        source.context(message)
+    })
 }
 
 /// Parses, renders, and packages one planned XML entry for pass 2.
 fn render_entry(detail_dir: &Path, entry: &PlannedEntry) -> Result<Rendered> {
     // Pass 2 does the expensive XML parse only after pass 1 has fixed the final order and path.
     let xml_path = detail_dir.join(format!("{}.xml", entry.mst));
-    let xml =
-        fs::read(&xml_path).with_context(|| format!("failed to read {}", xml_path.display()))?;
-    let body =
-        parse_law_body(&xml).with_context(|| format!("failed to parse {}", xml_path.display()))?;
+    let xml = read_law_xml(&xml_path)?;
+    let body = parse_law_body_at(&xml, &xml_path)?;
     let detail = LawDetail {
         metadata: entry.metadata.clone(),
         articles: body.articles,
@@ -600,12 +781,14 @@ fn render_entry(detail_dir: &Path, entry: &PlannedEntry) -> Result<Rendered> {
 
     let markdown = law_to_markdown(&detail)?;
     let (blob_sha, compressed_blob) = precompute_blob(&markdown);
+    let sha256 = git_writer::date_index::sha256(&markdown);
     let message = build_commit_message(&detail.metadata, &entry.mst)?;
     Ok(Rendered {
         path: entry.path.clone(),
         markdown,
         blob_sha,
         compressed_blob,
+        sha256,
         message,
         time,
     })
@@ -876,6 +1059,7 @@ mod tests {
             strict: false,
             expect_laws: None,
             manifest: None,
+            commit_date_basis: CommitDateBasis::Promulgation,
         })
         .unwrap();
     }
@@ -901,6 +1085,7 @@ mod tests {
             strict: false,
             expect_laws: None,
             manifest: Some(manifest_path.clone()),
+            commit_date_basis: CommitDateBasis::Promulgation,
         })
         .unwrap();
 
@@ -939,6 +1124,7 @@ mod tests {
             strict: false,
             expect_laws: None,
             manifest: None,
+            commit_date_basis: CommitDateBasis::Promulgation,
         })
         .unwrap();
 
@@ -1017,6 +1203,7 @@ mod tests {
             strict: false,
             expect_laws: None,
             manifest: None,
+            commit_date_basis: CommitDateBasis::Promulgation,
         })
         .unwrap();
 
@@ -1077,6 +1264,7 @@ mod tests {
             strict: false,
             expect_laws: None,
             manifest: None,
+            commit_date_basis: CommitDateBasis::Promulgation,
         })
         .unwrap();
 
@@ -1089,6 +1277,25 @@ mod tests {
         );
         assert!(latest.contains("법령MST: 200"));
         assert!(latest.contains("최신 본문입니다."));
+    }
+
+    #[test]
+    fn law_body_helpers_keep_path_and_original_cause() {
+        let path = Path::new("/nonexistent-law-dir/bad.xml");
+        let cause = parse_law_body(b"<law><").unwrap_err();
+        let error = parse_law_body_at(b"<law><", path).unwrap_err();
+        let text = error.to_string();
+        assert!(text.contains(&path.display().to_string()), "{text}");
+        assert!(text.contains(&cause.to_string()), "{text}");
+        assert!(
+            error
+                .chain()
+                .any(|link| link.to_string() == cause.to_string())
+        );
+
+        let missing = read_law_xml(path).unwrap_err();
+        assert!(missing.to_string().starts_with("failed to read "));
+        assert!(missing.chain().last().unwrap().is::<std::io::Error>());
     }
 
     fn git_stdout<const N: usize>(repo: &Path, args: [&str; N]) -> String {

@@ -6,6 +6,9 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
 use clap::Parser;
+use git_writer::date_index::{
+    DatePlan, PATH_REVISION_PREFIX, SourceRevision, repeal_and_enact_is_repeal,
+};
 use git_writer::{
     BareRepoWriter, GitTimestampKst, PreparedBlob, RepoPathBuf, escape_accidental_markdown_links,
     hex, precompute_blob,
@@ -17,6 +20,15 @@ use time::{Date, Month, PrimitiveDateTime, Time as CivilTime, UtcOffset};
 use unicode_normalization::UnicodeNormalization;
 
 const REPOSITORY_README: &[u8] = include_bytes!("../assets/README.md");
+
+/// Selects the date used for repository history.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, clap::ValueEnum)]
+enum CommitDateBasis {
+    /// Preserve the existing publication-date history.
+    Promulgation,
+    /// Replay revisions by their approved effective dates.
+    Enforcement,
+}
 
 /// Command-line interface.
 #[derive(Debug, Parser)]
@@ -34,6 +46,9 @@ struct Cli {
     /// Emit build manifest JSON to this path. Default: no manifest.
     #[arg(long)]
     manifest: Option<PathBuf>,
+    /// Select the date used for repository history.
+    #[arg(long, value_enum, default_value_t = CommitDateBasis::Promulgation)]
+    commit_date_basis: CommitDateBasis,
     /// Limit input files for probe runs.
     #[arg(long)]
     limit: Option<usize>,
@@ -141,6 +156,47 @@ fn main() -> Result<()> {
 
 /// Executes the requested compiler mode.
 fn run(cli: Cli) -> Result<()> {
+    if cli.commit_date_basis == CommitDateBasis::Enforcement {
+        let manifest = cli
+            .manifest
+            .as_deref()
+            .context("--commit-date-basis enforcement requires --manifest <path>")?;
+        if cli.tree {
+            anyhow::bail!("enforcement requires bare repository output");
+        }
+        let destination = if cli.validate {
+            manifest.to_path_buf()
+        } else {
+            DatePlan::check_destination(&cli.output, Some(manifest), true)?
+        };
+        let mut dates = DatePlan::from_sources(
+            "ordinances",
+            true,
+            date_sources(&cli.cache_dir, cli.limit)?,
+            false,
+        )?;
+        if cli.validate {
+            // The plan above has checked every date. The manifest has no date index.
+            let report = serde_json::json!({"schema_version":1, "head_commit_sha":""});
+            println!("{}", serde_json::to_string_pretty(&report)?);
+            anyhow::ensure!(
+                !destination.exists(),
+                "date index already exists: {}",
+                destination.display()
+            );
+            fs::write(&destination, serde_json::to_string_pretty(&report)?).with_context(|| {
+                format!("failed to write manifest to {}", destination.display())
+            })?;
+            return Ok(());
+        }
+        let (head, staged) = dates.replay(&cli.output, REPOSITORY_README)?;
+        return dates.publish_enforcement(
+            staged,
+            &head,
+            &destination,
+            serde_json::json!({"schema_version":1,"head_commit_sha":head}),
+        );
+    }
     if cli.validate {
         validate_cache(&cli.cache_dir, cli.limit, cli.manifest.as_deref())
     } else if cli.tree {
@@ -150,7 +206,23 @@ fn run(cli: Cli) -> Result<()> {
                 path.display()
             );
         }
-        compile_dir(&cli.cache_dir, &cli.output, cli.limit)
+        let entries = render_ordinance_entries(&cli.cache_dir, cli.limit)?;
+        let destination = DatePlan::check_destination(&cli.output, None, false)?;
+        let dates = DatePlan::from_sources(
+            "ordinances",
+            false,
+            date_sources(&cli.cache_dir, cli.limit)?,
+            false,
+        )?;
+        // The old index goes only after the tree is written, so a failed write keeps it.
+        write_tree(&entries, &cli.output)?;
+        DatePlan::discard_stale_index(&destination)?;
+        dates.publish(
+            None,
+            "",
+            &destination,
+            serde_json::json!({"schema_version":1,"head_commit_sha":""}),
+        )
     } else {
         compile_bare_repo_with_manifest(
             &cli.cache_dir,
@@ -181,6 +253,9 @@ fn compile_bare_repo_with_manifest(
             cache_dir.display()
         );
     }
+    let destination = DatePlan::check_destination(output, manifest, false)?;
+    let mut dates =
+        DatePlan::from_sources("ordinances", false, date_sources(cache_dir, limit)?, false)?;
 
     let mut repo = BareRepoWriter::create(output)?;
     repo.commit_static(
@@ -222,20 +297,257 @@ fn compile_bare_repo_with_manifest(
                 GitTimestampKst::from_epoch(entry.timestamp),
             )?;
         }
+        dates.record_body(&entry.path, &entry.content, repo.head_commit().unwrap());
     }
     let head_sha = repo.finish()?;
-    if let Some(path) = manifest {
-        write_manifest(
-            path,
-            &BuildManifest {
-                schema_version: 1,
-                head_commit_sha: hex(&head_sha),
-                entries_total: entries.len(),
-            },
-        )?;
-    }
+    let head = hex(&head_sha);
+    DatePlan::discard_stale_index(&destination)?;
+    dates.publish(
+        Some(output),
+        &head,
+        &destination,
+        serde_json::to_value(BuildManifest {
+            schema_version: 1,
+            head_commit_sha: head.clone(),
+            entries_total: entries.len(),
+        })?,
+    )?;
     eprintln!("committed {} ordinance revisions", entries.len());
     Ok(())
+}
+
+/// Collects every source copy before the original serial preference removes copies.
+/// Reduces an ordinance XML to its content for comparing two copies of one revision.
+///
+/// Notation and metadata that may differ between copies are ignored: all whitespace, the
+/// character code of the middle dot, elements that hold only whitespace, the local government
+/// name, and attachment keys and URLs. Any other difference stays visible.
+fn content_signature(xml: &[u8]) -> Result<Vec<(String, String)>> {
+    const IGNORED_ELEMENTS: [&str; 2] = ["지자체기관명", "별표첨부파일명"];
+    const IGNORED_ATTRIBUTES: [&str; 1] = ["별표키"];
+    let normalize = |text: &str| -> String {
+        text.chars()
+            .filter(|ch| !ch.is_whitespace())
+            .map(|ch| match ch {
+                '\u{318D}' | '\u{30FB}' | '\u{2022}' | '\u{2024}' | '\u{2027}' | '\u{2219}'
+                | '\u{22C5}' | '\u{FF65}' => '\u{00B7}',
+                other => other,
+            })
+            .collect()
+    };
+    let text = std::str::from_utf8(xml)?;
+    let mut reader = Reader::from_str(text);
+    reader.config_mut().trim_text(false);
+    reader.config_mut().expand_empty_elements = true;
+    let mut stack: Vec<String> = Vec::new();
+    let mut texts: Vec<String> = Vec::new();
+    let mut ignored_from: Option<usize> = None;
+    let mut found = Vec::new();
+    loop {
+        match reader.read_event()? {
+            Event::Start(event) => {
+                let name = String::from_utf8_lossy(event.name().as_ref()).to_string();
+                stack.push(name.clone());
+                texts.push(String::new());
+                if ignored_from.is_none() && IGNORED_ELEMENTS.contains(&name.as_str()) {
+                    ignored_from = Some(stack.len());
+                }
+                if ignored_from.is_none() {
+                    for attribute in event.attributes() {
+                        let attribute = attribute?;
+                        let key = String::from_utf8_lossy(attribute.key.as_ref()).to_string();
+                        if !IGNORED_ATTRIBUTES.contains(&key.as_str()) {
+                            let value = normalize(&attribute.unescape_value()?);
+                            found.push((format!("{}@{key}", stack.join("/")), value));
+                        }
+                    }
+                }
+            }
+            Event::Text(text) => {
+                if let Some(last) = texts.last_mut() {
+                    last.push_str(&text.decode()?);
+                }
+            }
+            Event::CData(text) => {
+                if let Some(last) = texts.last_mut() {
+                    last.push_str(&text.decode()?);
+                }
+            }
+            Event::GeneralRef(reference) => {
+                let decoded = quick_xml::escape::unescape(&format!("&{};", reference.decode()?))?
+                    .into_owned();
+                if let Some(last) = texts.last_mut() {
+                    last.push_str(&decoded);
+                }
+            }
+            Event::End(_) => {
+                let text = normalize(&texts.pop().unwrap_or_default());
+                if ignored_from.is_none() && !text.is_empty() {
+                    found.push((stack.join("/"), text));
+                }
+                if ignored_from == Some(stack.len()) {
+                    ignored_from = None;
+                }
+                stack.pop();
+            }
+            Event::Eof => break,
+            _ => {}
+        }
+    }
+    Ok(found)
+}
+
+/// Tells how two copies of one revision differ: nothing but notation, or in content or dates.
+fn copy_difference(kept: &[u8], other: &[u8]) -> Result<Option<String>> {
+    let (kept, other) = (content_signature(kept)?, content_signature(other)?);
+    if kept == other {
+        return Ok(None);
+    }
+    let first = kept
+        .iter()
+        .zip(&other)
+        .position(|(left, right)| left != right)
+        .unwrap_or(kept.len().min(other.len()));
+    let field = kept
+        .get(first)
+        .or_else(|| other.get(first))
+        .map_or("document", |(path, _)| path.as_str());
+    Ok(Some(format!("content differs at {field}")))
+}
+
+fn date_sources(
+    cache: &Path,
+    limit: Option<usize>,
+) -> Result<impl Iterator<Item = Result<SourceRevision>> + use<'_>> {
+    let mut files = read_xml_files(cache)?;
+    if let Some(limit) = limit {
+        files.truncate(limit);
+    }
+    let mut parsed: Vec<(PathBuf, Vec<u8>, Ordinance, u8)> = Vec::new();
+    let mut primary: BTreeMap<String, (u8, usize)> = BTreeMap::new();
+    let mut copies: BTreeMap<String, Vec<usize>> = BTreeMap::new();
+    for path in files {
+        let key = path
+            .file_stem()
+            .and_then(|stem| stem.to_str())
+            .unwrap_or("");
+        let (xml, ordinance) = load_ordinance(&path, key)?;
+        let history = path.parent() == Some(&cache.join("history"));
+        if history {
+            anyhow::ensure!(
+                ordinance.serial == key,
+                "history source serial mismatch: {}",
+                path.display()
+            );
+        }
+        if !matches!(
+            ordinance.ordinance_type.as_str(),
+            "조례" | "규칙" | "훈령" | "예규" | "고시" | "의회규칙"
+        ) {
+            continue;
+        }
+        let priority = if history {
+            2
+        } else if key == ordinance.serial {
+            1
+        } else {
+            0
+        };
+        // A missing serial is keyed by its path, as the default build does.
+        let serial = if ordinance.serial.is_empty() {
+            format!("{PATH_REVISION_PREFIX}{}", path.display())
+        } else {
+            ordinance.serial.clone()
+        };
+        if let Some((_, index)) = primary.get(&serial) {
+            let previous: &(PathBuf, Vec<u8>, Ordinance, u8) = &parsed[*index];
+            anyhow::ensure!(
+                previous.2.id == ordinance.id,
+                "duplicate source serial has different identities"
+            );
+        }
+        if primary
+            .get(&serial)
+            .is_none_or(|(previous, _)| priority >= *previous)
+        {
+            primary.insert(serial.clone(), (priority, parsed.len()));
+        }
+        copies.entry(serial).or_default().push(parsed.len());
+        parsed.push((path, xml, ordinance, priority));
+    }
+    // Copies of one revision with different bytes: merge those that differ only in notation
+    // and metadata (the default build's copy stays), and leave the others unresolved. One
+    // conflict marks every remaining copy of the revision, byte-equal copies included, so
+    // copies with the same bytes never get different states.
+    let mut merged: BTreeSet<usize> = BTreeSet::new();
+    let mut conflicts: BTreeMap<usize, String> = BTreeMap::new();
+    for (serial, indexes) in &copies {
+        let kept = primary[serial].1;
+        let mut note: Option<String> = None;
+        for index in indexes.iter().filter(|index| **index != kept) {
+            if parsed[*index].1 == parsed[kept].1 {
+                continue;
+            }
+            match copy_difference(&parsed[kept].1, &parsed[*index].1)? {
+                None => {
+                    merged.insert(*index);
+                }
+                Some(found) => {
+                    note.get_or_insert(found);
+                }
+            }
+        }
+        if let Some(note) = note {
+            for index in indexes.iter().filter(|index| !merged.contains(index)) {
+                conflicts.insert(*index, note.clone());
+            }
+        }
+    }
+    let mut registry = PathRegistry::new();
+    let mut paths = BTreeMap::new();
+    for (serial, (_, index)) in primary {
+        paths.insert(
+            serial,
+            ordinance_path(&parsed[index].2, &mut registry)
+                .to_string_lossy()
+                .replace('\\', "/"),
+        );
+    }
+    Ok(parsed
+        .into_iter()
+        .enumerate()
+        .filter(move |(index, _)| !merged.contains(index))
+        .map(move |(index, (path, xml, ordinance, priority))| {
+            let serial_key = if ordinance.serial.is_empty() {
+                format!("{PATH_REVISION_PREFIX}{}", path.display())
+            } else {
+                ordinance.serial.clone()
+            };
+            // A repeal-and-enact revision (폐지제정) is an enactment in the date index by the
+            // user decision, unless its only article is a repeal sentence. The default build
+            // keeps its original repeal handling.
+            let repeal = ordinance.is_repeal()
+                && (ordinance.amendment != "폐지제정" || repeal_and_enact_is_repeal(&xml));
+            Ok(SourceRevision {
+                identity: ordinance.id.clone(),
+                revision: serial_key.clone(),
+                name: ordinance.name.clone(),
+                category: ordinance.ordinance_type.clone(),
+                canonical_path: paths[&serial_key].clone(),
+                source_path: path.strip_prefix(cache)?.to_string_lossy().into_owned(),
+                xml,
+                promulgation: ordinance.prom_date_raw.clone(),
+                enforcement: ordinance.effective_date_raw.clone(),
+                amendment: ordinance.amendment.clone(),
+                repeal,
+                markdown: render_markdown(&ordinance).into_bytes(),
+                secondary_name: String::new(),
+                secondary_number: 0,
+                serial: ordinance.serial.parse().unwrap_or(u64::MAX),
+                copy_priority: priority,
+                copy_conflict: conflicts.get(&index).cloned(),
+            })
+        }))
 }
 
 /// Scans input cache and emits a JSON validation report without writing output.
@@ -250,6 +562,7 @@ fn validate_cache(cache_dir: &Path, limit: Option<usize>, manifest: Option<&Path
     let json = serde_json::to_string_pretty(&report)
         .context("failed to serialize validation report as JSON")?;
     println!("{json}");
+    // A validation run builds no repository, so its manifest has no date index.
     if let Some(path) = manifest {
         write_manifest(
             path,
@@ -262,7 +575,6 @@ fn validate_cache(cache_dir: &Path, limit: Option<usize>, manifest: Option<&Path
     }
     Ok(())
 }
-
 /// Writes a pretty-printed manifest JSON payload.
 fn write_manifest(path: &Path, manifest: &BuildManifest) -> Result<()> {
     let json = serde_json::to_string_pretty(manifest)
@@ -285,6 +597,19 @@ struct ImportEntry {
 
 type PathRegistry = BTreeMap<String, String>;
 
+/// Reads and parses XML with its source path and cause chain.
+fn load_ordinance(path: &Path, fallback: &str) -> Result<(Vec<u8>, Ordinance)> {
+    let raw = fs::read(path).map_err(|source| {
+        let message = format!("failed to read {}: {source}", path.display());
+        anyhow::Error::new(source).context(message)
+    })?;
+    let parsed = parse_ordinance(&raw, fallback).map_err(|source| {
+        let message = format!("failed to parse ordinance XML {}: {source}", path.display());
+        source.context(message)
+    })?;
+    Ok((raw, parsed))
+}
+
 fn render_ordinance_entries(cache_dir: &Path, limit: Option<usize>) -> Result<Vec<ImportEntry>> {
     let mut files = read_xml_files(cache_dir)?;
     if let Some(limit) = limit {
@@ -293,12 +618,10 @@ fn render_ordinance_entries(cache_dir: &Path, limit: Option<usize>) -> Result<Ve
     let mut candidates: BTreeMap<String, (u8, Ordinance)> = BTreeMap::new();
     let mut skipped = 0usize;
     for path in files {
-        let raw = fs::read(&path).with_context(|| format!("failed to read {}", path.display()))?;
-        let ordinance = parse_ordinance(
-            &raw,
+        let (_, ordinance) = load_ordinance(
+            &path,
             path.file_stem().and_then(|s| s.to_str()).unwrap_or(""),
-        )
-        .with_context(|| format!("failed to parse ordinance XML {}", path.display()))?;
+        )?;
         let cache_key = path.file_stem().and_then(|s| s.to_str()).unwrap_or("");
         if path.parent() == Some(&cache_dir.join("history")) {
             anyhow::ensure!(
@@ -319,7 +642,7 @@ fn render_ordinance_entries(cache_dir: &Path, limit: Option<usize>) -> Result<Ve
             continue;
         }
         let serial_key = if ordinance.serial.is_empty() {
-            format!("path:{}", path.display())
+            format!("{PATH_REVISION_PREFIX}{}", path.display())
         } else {
             ordinance.serial.clone()
         };
@@ -462,11 +785,16 @@ fn commit_timestamp(raw: &str) -> Result<i64> {
 }
 
 /// Compile every XML file under `cache_dir`.
+#[cfg(test)]
 fn compile_dir(cache_dir: &Path, output: &Path, limit: Option<usize>) -> Result<()> {
-    let entries = render_ordinance_entries(cache_dir, limit)?;
+    write_tree(&render_ordinance_entries(cache_dir, limit)?, output)
+}
+
+/// Writes already rendered entries as a Markdown tree.
+fn write_tree(entries: &[ImportEntry], output: &Path) -> Result<()> {
     fs::create_dir_all(output).with_context(|| format!("failed to create {}", output.display()))?;
     fs::write(output.join("README.md"), REPOSITORY_README)?;
-    for entry in &entries {
+    for entry in entries {
         if entry.delete_only {
             if let Some(previous_path) = &entry.previous_path {
                 let previous = output.join(previous_path);
@@ -2109,6 +2437,91 @@ mod tests {
             "{}",
             String::from_utf8_lossy(&output.stderr)
         );
+    }
+
+    #[test]
+    fn load_ordinance_keeps_path_and_original_cause() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("bad.xml");
+        fs::write(&path, "<Ordin><").unwrap();
+        let cause = parse_ordinance(b"<Ordin><", "bad").unwrap_err();
+
+        let error = load_ordinance(&path, "bad").unwrap_err();
+        let text = error.to_string();
+        assert!(text.contains("failed to parse ordinance XML"), "{text}");
+        assert!(text.contains(&path.display().to_string()), "{text}");
+        assert!(text.contains(&cause.to_string()), "{text}");
+        assert!(
+            error
+                .chain()
+                .any(|link| link.to_string() == cause.to_string())
+        );
+
+        let missing = load_ordinance(&temp.path().join("none.xml"), "none").unwrap_err();
+        assert!(missing.to_string().starts_with("failed to read "));
+        assert!(missing.chain().last().unwrap().is::<std::io::Error>());
+    }
+
+    fn copy_xml(institution: &str, article: &str, extra: &str, effective: &str) -> Vec<u8> {
+        format!(
+            "<LawService><자치법규기본정보><자치법규ID>1</자치법규ID><자치법규일련번호>7</자치법규일련번호>\
+             <공포일자>20100101</공포일자><시행일자>{effective}</시행일자><지자체기관명>{institution}</지자체기관명>\
+             <제개정이유>{extra}</제개정이유></자치법규기본정보>\
+             <조문><조 조문번호='000100'><조제목>목적</조제목><조내용><![CDATA[{article}]]></조내용></조></조문>\
+             <별표><별표단위 별표키=\"11\"><별표제목>별표 1</별표제목><별표첨부파일명>http://x/flSeq=1&amp;f=a</별표첨부파일명></별표단위></별표></LawService>"
+        )
+        .into_bytes()
+    }
+
+    #[test]
+    fn copies_that_differ_only_in_notation_and_metadata_have_no_difference() {
+        let kept = copy_xml("전라남도 구례군", "제1조 ㆍ 목적", "", "99991231");
+        // Government name, attachment key and URL, whitespace, middle-dot code and a blank
+        // element are notation or metadata.
+        let other = String::from_utf8(copy_xml(
+            "전남광주통합특별시 구례군",
+            "제1조\n·  목적 ",
+            " ",
+            "99991231",
+        ))
+        .unwrap()
+        .replace("별표키=\"11\"", "별표키=\"99\"")
+        .replace("flSeq=1&amp;f=a", "flSeq=2480&amp;f=b")
+        .into_bytes();
+        assert_eq!(copy_difference(&kept, &other).unwrap(), None);
+    }
+
+    #[test]
+    fn copies_that_differ_in_content_or_dates_have_a_difference() {
+        let kept = copy_xml("구례군", "제1조 목적", "", "20100201");
+        for (name, other) in [
+            (
+                "article text",
+                copy_xml("구례군", "제1조 목표", "", "20100201"),
+            ),
+            (
+                "effective date",
+                copy_xml("구례군", "제1조 목적", "", "99991231"),
+            ),
+            (
+                "a letter in a blank element",
+                copy_xml("구례군", "제1조 목적", "개정이유", "20100201"),
+            ),
+        ] {
+            assert!(copy_difference(&kept, &other).unwrap().is_some(), "{name}");
+        }
+        // An empty document differs from a full one.
+        assert!(
+            copy_difference(&kept, b"<LawService></LawService>")
+                .unwrap()
+                .is_some()
+        );
+        // A title present in only one copy is content, not notation.
+        let untitled = String::from_utf8(kept.clone())
+            .unwrap()
+            .replace("<조제목>목적</조제목>", "<조제목></조제목>")
+            .into_bytes();
+        assert!(copy_difference(&kept, &untitled).unwrap().is_some());
     }
 
     fn git_stdout<const N: usize>(repo: &Path, args: [&str; N]) -> String {

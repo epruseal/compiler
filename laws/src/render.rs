@@ -1,6 +1,7 @@
 use std::sync::OnceLock;
 
 use anyhow::{Result, bail};
+use git_writer::date_index::Occurrence;
 use git_writer::escape_accidental_markdown_links;
 use regex::Regex;
 use rustc_hash::FxHashMap as HashMap;
@@ -39,9 +40,9 @@ struct PreparedMetadata {
     /// Raw title before normalization for `원본제목`.
     raw_name: String,
     /// Promulgation date rendered as `YYYY-MM-DD`.
-    promulgation_date: String,
+    promulgation_date: Option<String>,
     /// Enforcement date rendered as `YYYY-MM-DD`.
-    enforcement_date: String,
+    enforcement_date: Option<String>,
     /// Promulgation number copied from XML metadata.
     promulgation_number: String,
     /// Department list for YAML frontmatter.
@@ -166,6 +167,19 @@ pub fn format_date(date: &str) -> Result<String> {
 
 /// Precomputes the normalized metadata view reused across renderer outputs.
 fn prepare_metadata(metadata: &LawMetadata) -> Result<PreparedMetadata> {
+    Ok(prepare_metadata_with_dates(
+        metadata,
+        Some(format_date(&metadata.promulgation_date)?),
+        Some(format_date(&metadata.enforcement_date)?),
+    ))
+}
+
+/// Prepares metadata with explicit dates from the caller.
+fn prepare_metadata_with_dates(
+    metadata: &LawMetadata,
+    promulgation_date: Option<String>,
+    enforcement_date: Option<String>,
+) -> PreparedMetadata {
     //
     // Normalize the law title once and derive the URL-friendly compact title from that same value.
     //
@@ -184,12 +198,12 @@ fn prepare_metadata(metadata: &LawMetadata) -> Result<PreparedMetadata> {
         .map(ToOwned::to_owned)
         .collect::<Vec<_>>();
 
-    Ok(PreparedMetadata {
+    PreparedMetadata {
         normalized_name,
         compact_name,
         raw_name: metadata.law_name.clone(),
-        promulgation_date: format_date(&metadata.promulgation_date)?,
-        enforcement_date: format_date(&metadata.enforcement_date)?,
+        promulgation_date,
+        enforcement_date,
         promulgation_number: metadata.promulgation_number.clone(),
         commit_department: if metadata.department_name.is_empty() {
             String::from("미상")
@@ -203,7 +217,7 @@ fn prepare_metadata(metadata: &LawMetadata) -> Result<PreparedMetadata> {
         } else {
             metadata.field.clone()
         },
-    })
+    }
 }
 
 /// Builds the Git commit message for one law revision.
@@ -241,7 +255,10 @@ pub fn build_commit_message(metadata: &LawMetadata, mst: &str) -> Result<String>
     ));
     lines.push(format!("신구법비교: {url_diff}"));
     lines.push(String::new());
-    lines.push(format!("공포일자: {}", prepared.promulgation_date));
+    lines.push(format!(
+        "공포일자: {}",
+        prepared.promulgation_date.as_deref().unwrap()
+    ));
     lines.push(format!("공포번호: {}", prepared.promulgation_number));
     lines.push(format!("소관부처: {}", prepared.commit_department));
     lines.push(format!("법령분야: {}", prepared.commit_field));
@@ -255,6 +272,37 @@ pub fn law_to_markdown(detail: &LawDetail) -> Result<Vec<u8>> {
     // Render YAML from the same metadata fields the Python pipeline emits.
     //
     let prepared = prepare_metadata(&detail.metadata)?;
+    render_law(detail, prepared, None)
+}
+
+/// Renders a source body with final dates from the approved resolver.
+pub fn law_to_date_markdown(detail: &LawDetail, dates: &Occurrence) -> Result<Vec<u8>> {
+    let prepared = prepare_metadata_with_dates(
+        &detail.metadata,
+        dates.promulgation_date.clone(),
+        dates.enforcement_date.clone(),
+    );
+    let unchanged = dates
+        .promulgation_date
+        .as_deref()
+        .map(|date| date.replace('-', ""))
+        .as_deref()
+        == Some(detail.metadata.promulgation_date.as_str())
+        && dates
+            .enforcement_date
+            .as_deref()
+            .map(|date| date.replace('-', ""))
+            .as_deref()
+            == Some(detail.metadata.enforcement_date.as_str());
+    render_law(detail, prepared, (!unchanged).then_some(dates))
+}
+
+/// Shares article and attachment output between the two metadata boundaries.
+fn render_law(
+    detail: &LawDetail,
+    prepared: PreparedMetadata,
+    dates: Option<&Occurrence>,
+) -> Result<Vec<u8>> {
     let frontmatter = {
         Frontmatter {
             title: prepared.normalized_name.clone(),
@@ -281,6 +329,16 @@ pub fn law_to_markdown(detail: &LawDetail) -> Result<Vec<u8>> {
     let mut yaml = serde_yaml::to_string(&frontmatter)?;
     if let Some(stripped) = yaml.strip_prefix("---\n") {
         yaml = stripped.to_owned();
+    }
+
+    if let Some(dates) = dates {
+        yaml.push_str(&format!(
+            "공포일자_raw: {}\n시행일자_raw: {}\n원문날짜판단: {}\n",
+            serde_json::to_string(&dates.raw_promulgation_date)?,
+            serde_json::to_string(&dates.raw_enforcement_date)?,
+            serde_json::to_string(&serde_json::json!({"status": dates.status,
+                "reason": dates.reason, "date_evidence": dates.date_evidence}))?,
+        ));
     }
 
     //
@@ -530,13 +588,13 @@ struct Frontmatter {
     departments: Vec<String>,
     /// Normalized promulgation date.
     #[serde(rename = "공포일자")]
-    promulgation_date: String,
+    promulgation_date: Option<String>,
     /// Promulgation number string from the source XML.
     #[serde(rename = "공포번호")]
     promulgation_number: String,
     /// Normalized enforcement date.
     #[serde(rename = "시행일자")]
-    enforcement_date: String,
+    enforcement_date: Option<String>,
     /// Law field/category label.
     #[serde(rename = "법령분야")]
     field: String,

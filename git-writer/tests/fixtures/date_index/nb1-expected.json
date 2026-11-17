@@ -1,0 +1,57 @@
+{
+  "purpose": "expected values of the control inputs for the re-verification observation NB1 (verdict fresh-verifier-n2-20261116, delta 8 B2). Fixed before the test code of these cases. A subjectless effective phrase or a partial-article date inside the selection range of an approval does not hold the approval (user decision user-nb1-approval-scope-i4-20261117, I4 second class). The case ids A8 and C9 and C10 are the ids of the verification.",
+  "cases": [
+    {
+      "id": "nb1-f2a-a8-subjectless-other-date-same-piece",
+      "revision": "2200000088451",
+      "basis": "A8: the approved sentence is followed in the same CDATA by '2009. 7. 1.부터 시행한다.' (no subject); the approval applies",
+      "expect": {
+        "approval_applied": true,
+        "approval_not_applied": false,
+        "date_withheld": null,
+        "enforcement_date": "2009-06-27",
+        "reason": "individually approved explicit date of the amendment statement (user-amendment-explicit-dates-20261113)",
+        "status": "confirmed"
+      }
+    },
+    {
+      "id": "nb1-f2b-a8-subjectless-other-date-same-piece",
+      "revision": "2200000104677",
+      "basis": "A8 of F2b: the approved sentence is followed in the same CDATA by '1998. 11. 1.부터 시행한다.' (no subject); the approval applies",
+      "expect": {
+        "approval_applied": true,
+        "approval_not_applied": false,
+        "date_withheld": null,
+        "enforcement_date": "1998-10-07",
+        "reason": "individually approved explicit date of the amendment statement (user-amendment-explicit-dates-20261113)",
+        "status": "confirmed"
+      }
+    },
+    {
+      "id": "nb1-1063983-c9-subjectless-other-date-same-line",
+      "revision": "1063983",
+      "basis": "C9: the line of the approved sentence ends with '2007년 7월 1일부터 시행한다.' (no subject); the approval applies",
+      "expect": {
+        "approval_applied": true,
+        "approval_not_applied": false,
+        "date_withheld": null,
+        "enforcement_date": "2007-06-01",
+        "reason": "individually approved addendum date before the source effective date (user-1063983-explicit-clause-date-20261113)",
+        "status": "confirmed"
+      }
+    },
+    {
+      "id": "nb1-1063983-c10-subjectless-other-date-amendment-next-line",
+      "revision": "1063983",
+      "basis": "C10: the line after the approved sentence of the amendment text is '2007년 7월 1일부터 시행한다.' (no subject); the approval applies",
+      "expect": {
+        "approval_applied": true,
+        "approval_not_applied": false,
+        "date_withheld": null,
+        "enforcement_date": "2007-06-01",
+        "reason": "individually approved addendum date before the source effective date (user-1063983-explicit-clause-date-20261113)",
+        "status": "confirmed"
+      }
+    }
+  ]
+}

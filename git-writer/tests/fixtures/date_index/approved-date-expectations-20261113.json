@@ -1,0 +1,63 @@
+{
+  "purpose": "User-approved date expectations fixed before implementation output",
+  "recorded_date": "2026-11-13",
+  "implementation_status": "design-only",
+  "scope": "The three exact revisions below; no general rule for other revisions",
+  "checks": [
+    "Keep every input in the occurrence reconciliation",
+    "Check approved date, source attribution, raw source dates and decision evidence",
+    "Keep default promulgation Git output and promulgation-date query semantics unchanged",
+    "Check other unread sentences, conflicting copies and final output consistency"
+  ],
+  "revisions": [
+    {
+      "dataset": "admrules",
+      "identity": "2111925",
+      "revision": "2200000088451",
+      "raw_promulgation_date": "20090410",
+      "raw_enforcement_date": "99991231",
+      "observed_source_sha256": "9f137cda5dbf9672d4f736830bf94d73a14d8726b035b72c5c008fec120da000",
+      "approved_sentence": "이 예규는 2009. 6. 27.부터 시행한다.",
+      "sentence_field": "개정문내용",
+      "expected_status": "confirmed",
+      "expected_enforcement_date": "2009-06-27",
+      "expected_promulgation_date": "2009-04-10",
+      "decision_id": "user-amendment-explicit-dates-20261113",
+      "user_choice": "개정문의 명시 날짜로 확정",
+      "continuation": "ㄱㄱ"
+    },
+    {
+      "dataset": "admrules",
+      "identity": "2113631",
+      "revision": "2200000104677",
+      "raw_promulgation_date": "19981002",
+      "raw_enforcement_date": "99991231",
+      "observed_source_sha256": "cbdf15bfb3871c1fa4df83335dce1bd647efe9325331cc6f93776a67ef44a86b",
+      "approved_sentence": "이 예규는 1998.10. 7.부터 시행한다.",
+      "sentence_field": "개정문내용",
+      "expected_status": "confirmed",
+      "expected_enforcement_date": "1998-10-07",
+      "expected_promulgation_date": "1998-10-02",
+      "decision_id": "user-amendment-explicit-dates-20261113",
+      "user_choice": "개정문의 명시 날짜로 확정",
+      "continuation": "ㄱㄱ"
+    },
+    {
+      "dataset": "ordinances",
+      "identity": "2153239",
+      "revision": "1063983",
+      "raw_promulgation_date": "20070530",
+      "raw_enforcement_date": "20070530",
+      "observed_source_sha256": "ae1e94de4de982f86254e24737d2b729171d3dad1b0c7d46d5433885374ba265",
+      "approved_sentence": "이 규칙은 2007년 6월 1일부터 시행한다.",
+      "sentence_fields": ["부칙내용", "제개정이유내용"],
+      "expected_status": "confirmed",
+      "expected_enforcement_date": "2007-06-01",
+      "expected_promulgation_date": "2007-05-30",
+      "decision_id": "user-1063983-explicit-clause-date-20261113",
+      "user_choice": "이 판본은 문장 날짜"
+    }
+  ],
+  "evidence_fields": "Final key names require design verification; decision ID, approved text, source and conflict must be present",
+  "known_source_condition": "Observed hashes document source identity; an exact-hash selection rule remains a design option, not an approved general rule"
+}
