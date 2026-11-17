@@ -16592,10 +16592,15 @@ mod tests {
     /// One enforcement revision whose attributed addendum section sets the day of promulgation
     /// and a separate timing in its second article (compiler#5).
     fn separate_timing_plan() -> DatePlan {
+        separate_timing_plan_for(true)
+    }
+
+    /// `separate_timing_plan` built on the enforcement or the promulgation basis.
+    fn separate_timing_plan_for(enforcement: bool) -> DatePlan {
         let text = "부칙 (1998.1.31 조례 제370호) 제1조(시행일) 이 조례는 공포한 날부터 시행한다.\n제2조(요금) 징수는 공포한 달의 익월 1일부터 시행한다.\n부칙 개정(1999.12.31 조례 제459호) 제1조(시행일) 이 조례는 공포한 날부터 시행한다.\n제2조(주차요금의 조정시기) 주차요금 징수는 2000년 2월 1일부터 시행한다.\n";
         let mut source = revision("조례", "일부개정", "19991231", 459, text);
         source.markdown = b"---\nname: x\n---\nbody\n".to_vec();
-        let plan = DatePlan::new("ordinances", true, vec![source]).unwrap();
+        let plan = DatePlan::new("ordinances", enforcement, vec![source]).unwrap();
         let found = plan.occurrence(0);
         assert_eq!(
             (found.status.as_str(), found.enforcement_date.as_deref()),
@@ -16619,14 +16624,12 @@ mod tests {
         )
     }
 
-    /// The revision object of the plan's manifest index, written with sorted keys.
-    fn manifest_revision(plan: DatePlan) -> String {
+    /// The manifest text of the plan and the first revision object of its index.
+    fn manifest_revision(plan: DatePlan) -> (String, Value) {
         let (bytes, _) = plan.prepare_publication(None, "head", json!({})).unwrap();
         let manifest: Value = serde_json::from_slice(&bytes).unwrap();
-        let mut revision = manifest["date_index"]["revisions"][0].clone();
-        revision.as_object_mut().unwrap().remove("occurrences");
-        revision.as_object_mut().unwrap().remove("body");
-        serde_json::to_string(&revision).unwrap()
+        let revision = manifest["date_index"]["revisions"][0].clone();
+        (String::from_utf8(bytes).unwrap(), revision)
     }
 
     #[test]
@@ -16662,16 +16665,48 @@ mod tests {
             let file = plan
                 .identity_file_bytes("1", &[0], Some("2000-01-01"), &mut cache)
                 .unwrap();
-            let file = String::from_utf8(file).unwrap();
-            assert!(file.contains("\"date_evidence\""), "{file}");
-            assert!(
-                !file.contains("\"separate_application_timing\": true"),
-                "{file}"
+            let empty = evidence.is_some();
+            let found = plan.occurrence(0);
+            assert_eq!(
+                found
+                    .date_evidence
+                    .get("separate_application_timing")
+                    .is_some(),
+                empty,
+                "{evidence:?}"
             );
-            let revision = manifest_revision(plan);
+            let file = String::from_utf8(file).unwrap();
+            assert!(file.contains("\"date_evidence\""), "{evidence:?} {file}");
             assert!(
-                !revision.contains("\"separate_application_timing\":true"),
-                "{revision}"
+                !file.contains("\"separate_application_timing\": false"),
+                "{evidence:?} {file}"
+            );
+            let value: Value = serde_json::from_str(&file).unwrap();
+            let revision = &value["revisions"][0];
+            assert!(revision.is_object(), "{evidence:?} {file}");
+            assert!(
+                revision.get("separate_application_timing").is_none(),
+                "{evidence:?} {file}"
+            );
+            assert_eq!(
+                revision["date_evidence"].get("separate_application_timing"),
+                evidence.as_ref(),
+                "{evidence:?} {file}"
+            );
+            let (text, revision) = manifest_revision(plan);
+            assert!(
+                !text.contains("\"separate_application_timing\": false"),
+                "{evidence:?} {text}"
+            );
+            assert!(revision.is_object(), "{evidence:?} {text}");
+            assert!(
+                revision.get("separate_application_timing").is_none(),
+                "{evidence:?} {text}"
+            );
+            assert_eq!(
+                revision["date_evidence"].get("separate_application_timing"),
+                evidence.as_ref(),
+                "{evidence:?} {text}"
             );
         }
     }
@@ -16690,12 +16725,28 @@ mod tests {
             ),
             "{file}"
         );
-        let revision = manifest_revision(plan);
+        let (text, _) = manifest_revision(plan);
         assert!(
-            revision.contains(
-                "\"revision\":\"9\",\"separate_application_timing\":true,\"status\":\"confirmed\""
+            text.contains(
+                "\"revision\": \"9\",\n        \"separate_application_timing\": true,\n        \"status\": \"confirmed\""
             ),
-            "{revision}"
+            "{text}"
+        );
+    }
+
+    #[test]
+    fn separate_timing_marks_the_promulgation_basis_index() {
+        let plan = separate_timing_plan_for(false);
+        let (text, revision) = manifest_revision(plan);
+        assert_eq!(
+            revision["separate_application_timing"],
+            json!(true),
+            "{text}"
+        );
+        assert_eq!(
+            revision["date_evidence"]["separate_application_timing"],
+            json!([SEPARATE_TIMING_SENTENCE]),
+            "{text}"
         );
     }
 
