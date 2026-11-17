@@ -7385,9 +7385,9 @@ impl DatePlan {
     }
 
     /// The single place where a date that an LLM judgment selected shows as status `llm`
-    /// (design-v3-integration.md 3.3). It runs after every other processing of the plan, so the
-    /// gate, the cap and the repeal rule read the date as confirmed. A date that one of them took
-    /// away stays unresolved with its `llm_judgment` evidence.
+    /// (design-v3-integration.md 3.3). Only the cross-check comes after it; the gate, the cap and
+    /// the repeal rule read the date as confirmed. A date that one of them took away stays
+    /// unresolved with its `llm_judgment` evidence.
     fn mark_llm_dates(&mut self) {
         for revision in &mut self.revisions {
             let mut changed = false;
@@ -7784,8 +7784,8 @@ impl DatePlan {
 
     /// The gate of every revision group (see `Occurrence::apply_gate`), after the processing of the
     /// plan that gives each revision its state (the cap of `defer_late_label_dates`), so each result
-    /// that the earlier processing made keeps its own evidence. Only `leave_revived_unresolved`
-    /// comes after it. The first occurrence of a revision stands for the revision, as in
+    /// that the earlier processing made keeps its own evidence. The repeal rule and the LLM steps
+    /// come after it. The first occurrence of a revision stands for the revision, as in
     /// `defer_late_label_dates`.
     fn apply_gate(&mut self) {
         // The unit is the revision, whatever the number of its copies: copies of one revision

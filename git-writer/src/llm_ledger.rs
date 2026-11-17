@@ -209,9 +209,9 @@ impl LlmLedger {
         self.cross.len()
     }
 
-    /// Tells whether no judgment is usable.
+    /// Tells whether no judgment and no cross-check is usable.
     pub fn is_empty(&self) -> bool {
-        self.entries.is_empty()
+        self.entries.is_empty() && self.cross.is_empty()
     }
 }
 
