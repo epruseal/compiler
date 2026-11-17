@@ -912,3 +912,68 @@ fn enforcement_rejects_manifest_collisions_and_missing_parents() {
     assert_eq!(fs::read(&diagnostic).unwrap(), b"existing diagnostic");
     assert!(!output.exists());
 }
+
+#[test]
+fn enforcement_revision_commits_carry_the_identity_lines_of_the_default_mode() {
+    // user-enforcement-mst-trailer-20261117: a consumer finds a past copy by these lines.
+    let temp = tempfile::tempdir().unwrap();
+    let cache = write_cache(
+        temp.path(),
+        &[
+            (
+                "1",
+                ordinance(
+                    "9500001",
+                    "1",
+                    "20200101",
+                    "제정",
+                    "(2020.1.1)",
+                    PLAIN,
+                    "11",
+                ),
+            ),
+            (
+                "2",
+                ordinance(
+                    "9500001",
+                    "2",
+                    "20210101",
+                    "일부개정",
+                    "(2021.1.1)",
+                    PLAIN,
+                    "22",
+                ),
+            ),
+        ],
+    );
+    let output = temp.path().join("out.git");
+    let manifest = temp.path().join("index.json");
+    let built = run(&[
+        cache.as_os_str(),
+        "-o".as_ref(),
+        output.as_os_str(),
+        "--commit-date-basis".as_ref(),
+        "enforcement".as_ref(),
+        "--manifest".as_ref(),
+        manifest.as_os_str(),
+    ]);
+    assert!(built.status.success(), "{}", stderr(&built));
+    let log = git(&output, &["log", "--reverse", "--format=%x01%B"]);
+    let revisions: Vec<&str> = log
+        .split('\u{1}')
+        .filter(|message| message.contains("\nrevision: "))
+        .collect();
+    assert_eq!(revisions.len(), 2, "{log}");
+    for (message, serial) in revisions.iter().zip(["1", "2"]) {
+        let lines =
+            format!("\n\n자치법규ID: 9500001\n자치법규일련번호: {serial}\n\nEffective-Date: ");
+        assert!(message.contains(&lines), "{message}");
+    }
+    // Date snapshot commits stay as they were.
+    for message in log
+        .split('\u{1}')
+        .filter(|m| m.starts_with("Record date snapshot"))
+    {
+        assert!(!message.contains("자치법규"), "{message}");
+    }
+}

@@ -3220,6 +3220,19 @@ fn same_llm_date(kind: &ClauseKind, outcome: &str, date: Date, publication: Opti
     }
 }
 
+/// Gives the identity lines of a revision commit in the enforcement mode, with a blank line after
+/// them. The keys and their order are the ones of the default-mode commit of each dataset, so a
+/// consumer that finds a revision by these lines reads both modes the same way
+/// (user-enforcement-mst-trailer-20261117). An unknown dataset gets no lines.
+fn identity_lines(dataset: &str, identity: &str, revision: &str) -> String {
+    match dataset {
+        "ordinances" => format!("자치법규ID: {identity}\n자치법규일련번호: {revision}\n\n"),
+        "admrules" => format!("행정규칙일련번호: {revision}\n행정규칙ID: {identity}\n\n"),
+        "laws" => format!("법령MST: {revision}\n\n"),
+        _ => String::new(),
+    }
+}
+
 /// What selects no LLM date: the evidence `llm_not_applied`.
 fn llm_not_applied(reason: &str, detail: Value) -> Value {
     let mut value = json!({"reason": reason, "decision": "lead-c2-integration-contract-20261117"});
@@ -7803,7 +7816,7 @@ impl DatePlan {
                     let occurrence = self.occurrence(source_index);
                     let unresolved = occurrence.status == "unresolved";
                     let message = format!(
-                        "{}: {}{}\n\nrevision: {}\nevent_date: {}\nstatus: {}\nreason: {}\n\nEffective-Date: {}",
+                        "{}: {}{}\n\nrevision: {}\nevent_date: {}\nstatus: {}\nreason: {}\n\n{}Effective-Date: {}",
                         source.category,
                         source.name,
                         if occurrence.status == "estimated" {
@@ -7817,6 +7830,7 @@ impl DatePlan {
                         date,
                         occurrence.status,
                         occurrence.reason,
+                        identity_lines(&self.dataset, &source.identity, &source.revision),
                         date
                     );
                     if source.repeal && !unresolved {

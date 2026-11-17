@@ -491,3 +491,48 @@ fn enforcement_publication_refuses_collisions_and_leaves_existing_files_untouche
     assert_eq!(index["final_state_deletions_marked"], false);
     assert_eq!(index["entries_total_basis"], "source_occurrences");
 }
+
+#[test]
+fn enforcement_revision_commits_carry_the_mst_line_of_the_default_mode() {
+    // user-enforcement-mst-trailer-20261117: the default-mode commit has 법령MST only.
+    let temp = tempfile::tempdir().unwrap();
+    let cache = temp.path().join("cache");
+    fs::create_dir_all(cache.join("detail")).unwrap();
+    fs::write(
+        cache.join("detail/503.xml"),
+        xml("20020101", "20020201", "원문"),
+    )
+    .unwrap();
+    let output = temp.path().join("out.git");
+    let manifest = temp.path().join("index.json");
+    let result = Command::new(env!("CARGO_BIN_EXE_legalize-kr-compiler"))
+        .arg(&cache)
+        .arg("-o")
+        .arg(&output)
+        .args(["--commit-date-basis", "enforcement", "--manifest"])
+        .arg(&manifest)
+        .output()
+        .unwrap();
+    assert!(
+        result.status.success(),
+        "{}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    let log = Command::new("git")
+        .arg("--git-dir")
+        .arg(&output)
+        .args(["log", "--format=%x01%B"])
+        .output()
+        .unwrap();
+    let log = String::from_utf8(log.stdout).unwrap();
+    let revisions: Vec<&str> = log
+        .split('\u{1}')
+        .filter(|message| message.contains("\nrevision: "))
+        .collect();
+    assert_eq!(revisions.len(), 1, "{log}");
+    assert!(
+        revisions[0].contains("\n\n법령MST: 503\n\nEffective-Date: "),
+        "{}",
+        revisions[0]
+    );
+}
