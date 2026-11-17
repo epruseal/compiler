@@ -6909,14 +6909,11 @@ impl DatePlan {
         // the gate withholds withholds every copy that is confirmed or estimated, and so the
         // commit date of the revision follows.
         let mut groups: BTreeMap<(String, String), Vec<usize>> = BTreeMap::new();
-        for source in 0..self.sources.len() {
+        for (index, source) in self.sources.iter().enumerate() {
             groups
-                .entry((
-                    self.sources[source].identity.clone(),
-                    self.sources[source].revision.clone(),
-                ))
+                .entry((source.identity.clone(), source.revision.clone()))
                 .or_default()
-                .push(source);
+                .push(index);
         }
         for members in groups.values() {
             // A copy that does not carry the same approval as another copy (it fails a condition
