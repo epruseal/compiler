@@ -3306,6 +3306,10 @@ fn llm_approval(
     let mut found = Vec::new();
     let mut blocking = Vec::new();
     let mut label_dates = BTreeSet::new();
+    // The read clauses of the quote itself, for the record: the offset of the clause start from
+    // the quote start, its kind and whether it gives the date of the judgment. A clause with an
+    // offset above 0 is one that a definition by the quote start would not have left out.
+    let mut quote_clauses = Vec::new();
     for (container, text, raw) in fields {
         let places = quote_places(text, &entry.quote);
         if places.is_empty() {
@@ -3337,6 +3341,11 @@ fn llm_approval(
             // B2 reads the read sentences only; the gate takes the unread ones outside C (v3.4 1).
             for (start, clause) in clauses.iter().filter(|(_, clause)| !clause.unread) {
                 let own = (at..end).contains(&(from + start));
+                if own {
+                    quote_clauses.push(json!({"offset": from + start - at,
+                        "kind": match clause.kind { ClauseKind::Plain => "plain", ClauseKind::Explicit(_) => "explicit", ClauseKind::Other => "other" },
+                        "same_date": same_llm_date(&clause.kind, &entry.outcome, date, publication)}));
+                }
                 if clause.proviso {
                     blocking.push(
                         if own {
@@ -3400,6 +3409,7 @@ fn llm_approval(
         "next_promulgation": entry.next_promulgation,
         "sources": found,
         "blocking": blocking,
+        "quote_clauses": quote_clauses,
     });
     Ok(Some(Ok(LlmSelection {
         date,
