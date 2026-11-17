@@ -114,6 +114,7 @@ consumer CLI의 날짜 조회(`--date`와 `--date-index`)는 index의 날짜를 
 같은 판본의 원 사본과 연혁(history) 사본은 표기와 메타데이터만 다르면(공백, 가운뎃점 문자 코드, 지자체기관명, 별표 첨부파일 키와 URL, 빈 요소) 하나로 합치고 연혁 사본을 씁니다.
 내용이나 날짜가 다르면 두 사본 모두 미해결로 두고 reason에 사유를 적습니다.
 공포일이 깨지고 시행일이 유효한 판본은 occurrence의 `undated_semantics`에 `공포일자`를 담습니다. 키가 없으면 빈 목록입니다.
+날짜가 있는 판본(`confirmed`, `estimated`, `llm`)의 근거 `separate_application_timing`이 비어 있지 않으면, 부칙이 그 날짜와 따로 적용 시기를 정한 문장이 있다는 뜻입니다. 이때 index의 판본 항목에 `separate_application_timing: true`를 쓰고, `enforcement` 본문 frontmatter에 `별도적용시기: true`와 그 문장 목록 `별도적용시기문장`을 씁니다. 표지가 없는 판본에는 이 키들이 없습니다.
 기본 공포일 빌드에서는 manifest를 출력 저장소 안에 두어도 됩니다.
 
 부칙 해석 규칙(귀속, 라벨, 단서, 폐지제정 등)과 개별 사례의 정본은 [시행일 예외 기록](docs/enforcement-date-exceptions.md)입니다.

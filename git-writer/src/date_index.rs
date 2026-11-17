@@ -105,6 +105,11 @@ struct Revision {
     repeal: bool,
     reason: String,
     date_evidence: Value,
+    /// True when the first occurrence has a date and separate application timing sentences
+    /// (see `separate_timing`). `summarize` sets it. Absent from the index when false, so a
+    /// revision without the mark keeps its bytes.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    separate_application_timing: bool,
     occurrences: Vec<Occurrence>,
     body: Value,
 }
@@ -4604,6 +4609,19 @@ fn plain_promulgation_clause(body: &str, subject: &str) -> Option<Vec<String>> {
     })
 }
 
+/// The separate application timing sentences that mark an occurrence (compiler#5): the
+/// non-empty `separate_application_timing` list of `plain_promulgation_clause` when the
+/// occurrence has a date. An occurrence without a date has no date to set them apart from,
+/// although the steps that take a date away keep the list.
+fn separate_timing<'a>(status: &str, evidence: &'a Value) -> Option<&'a Vec<Value>> {
+    if !matches!(status, "confirmed" | "estimated" | "llm") {
+        return None;
+    }
+    evidence["separate_application_timing"]
+        .as_array()
+        .filter(|sentences| !sentences.is_empty())
+}
+
 /// Tells whether addendum text in the articles of this revision is excluded by its amendment kind.
 ///
 /// Amendments made by another ordinance stay unresolved (rule 8: the text in the articles
@@ -7129,6 +7147,7 @@ impl DatePlan {
                     repeal: source.repeal,
                     reason: occurrence.reason.clone(),
                     date_evidence: occurrence.date_evidence.clone(),
+                    separate_application_timing: false,
                     occurrences: Vec::new(),
                     body: Value::Null,
                 });
@@ -8032,6 +8051,14 @@ impl DatePlan {
                 serde_json::to_string(&occurrence.date_evidence["llm_judgment"]["quote"])?
             ));
         }
+        // A dated revision whose addendum sets a separate application timing names those
+        // sentences (compiler#5). Without them the body keeps its bytes.
+        if let Some(sentences) = separate_timing(&occurrence.status, &occurrence.date_evidence) {
+            extra.push_str(&format!(
+                "별도적용시기: true\n별도적용시기문장: {}\n",
+                serde_json::to_string(sentences)?
+            ));
+        }
         Ok(format!("---\n{extra}{}", &original[4..]).into_bytes())
     }
 
@@ -8385,6 +8412,9 @@ impl DatePlan {
         let first = &revision.occurrences[0];
         revision.reason = first.reason.clone();
         revision.date_evidence = first.date_evidence.clone();
+        // The mark follows the same occurrence as the evidence (compiler#5).
+        revision.separate_application_timing =
+            separate_timing(&first.status, &first.date_evidence).is_some();
         revision.promulgation_date = if revision
             .occurrences
             .iter()
@@ -16557,6 +16587,160 @@ mod tests {
             let error = verify_git_bodies(&repo, &head, &[&good, bad]).unwrap_err();
             assert!(error.to_string().contains(message), "{message}: {error}");
         }
+    }
+
+    /// One enforcement revision whose attributed addendum section sets the day of promulgation
+    /// and a separate timing in its second article (compiler#5).
+    fn separate_timing_plan() -> DatePlan {
+        let text = "부칙 (1998.1.31 조례 제370호) 제1조(시행일) 이 조례는 공포한 날부터 시행한다.\n제2조(요금) 징수는 공포한 달의 익월 1일부터 시행한다.\n부칙 개정(1999.12.31 조례 제459호) 제1조(시행일) 이 조례는 공포한 날부터 시행한다.\n제2조(주차요금의 조정시기) 주차요금 징수는 2000년 2월 1일부터 시행한다.\n";
+        let mut source = revision("조례", "일부개정", "19991231", 459, text);
+        source.markdown = b"---\nname: x\n---\nbody\n".to_vec();
+        let plan = DatePlan::new("ordinances", true, vec![source]).unwrap();
+        let found = plan.occurrence(0);
+        assert_eq!(
+            (found.status.as_str(), found.enforcement_date.as_deref()),
+            ("confirmed", Some("1999-12-31"))
+        );
+        assert_eq!(
+            found.date_evidence["separate_application_timing"],
+            json!([SEPARATE_TIMING_SENTENCE])
+        );
+        plan
+    }
+
+    const SEPARATE_TIMING_SENTENCE: &str =
+        "제2조(주차요금의 조정시기) 주차요금 징수는 2000년 2월 1일부터 시행한다.";
+
+    /// The body of `separate_timing_plan` as the build before compiler#5 wrote it.
+    fn unmarked_timing_body(plan: &DatePlan) -> String {
+        format!(
+            "---\n날짜판단상태: \"confirmed\"\n법적시행일: \"1999-12-31\"\n검색배치일: \"1999-12-31\"\n시행일판단근거: {}\nname: x\n---\nbody\n",
+            serde_json::to_string(&plan.occurrence(0).reason).unwrap()
+        )
+    }
+
+    /// The revision object of the plan's manifest index, written with sorted keys.
+    fn manifest_revision(plan: DatePlan) -> String {
+        let (bytes, _) = plan.prepare_publication(None, "head", json!({})).unwrap();
+        let manifest: Value = serde_json::from_slice(&bytes).unwrap();
+        let mut revision = manifest["date_index"]["revisions"][0].clone();
+        revision.as_object_mut().unwrap().remove("occurrences");
+        revision.as_object_mut().unwrap().remove("body");
+        serde_json::to_string(&revision).unwrap()
+    }
+
+    #[test]
+    fn separate_timing_marks_the_frontmatter_after_the_date_lines() {
+        let plan = separate_timing_plan();
+        let body = String::from_utf8(plan.replay_body(0).unwrap()).unwrap();
+        let expected = unmarked_timing_body(&plan).replacen(
+            "name: x\n",
+            &format!(
+                "별도적용시기: true\n별도적용시기문장: [{}]\nname: x\n",
+                serde_json::to_string(SEPARATE_TIMING_SENTENCE).unwrap()
+            ),
+            1,
+        );
+        assert_eq!(body, expected);
+    }
+
+    #[test]
+    fn a_revision_without_separate_timing_keeps_its_body_and_index_bytes() {
+        for evidence in [Some(json!([])), None] {
+            let mut plan = separate_timing_plan();
+            let found = &mut plan.revisions[0].occurrences[0];
+            let object = found.date_evidence.as_object_mut().unwrap();
+            match &evidence {
+                Some(value) => {
+                    object.insert("separate_application_timing".to_owned(), value.clone())
+                }
+                None => object.remove("separate_application_timing"),
+            };
+            let body = String::from_utf8(plan.replay_body(0).unwrap()).unwrap();
+            assert_eq!(body, unmarked_timing_body(&plan), "{evidence:?}");
+            let mut cache = SnapshotCache::new(plan.revisions.len());
+            let file = plan
+                .identity_file_bytes("1", &[0], Some("2000-01-01"), &mut cache)
+                .unwrap();
+            let file = String::from_utf8(file).unwrap();
+            assert!(file.contains("\"date_evidence\""), "{file}");
+            assert!(
+                !file.contains("\"separate_application_timing\": true"),
+                "{file}"
+            );
+            let revision = manifest_revision(plan);
+            assert!(
+                !revision.contains("\"separate_application_timing\":true"),
+                "{revision}"
+            );
+        }
+    }
+
+    #[test]
+    fn separate_timing_marks_the_index_revision_in_key_order() {
+        let plan = separate_timing_plan();
+        let mut cache = SnapshotCache::new(plan.revisions.len());
+        let file = plan
+            .identity_file_bytes("1", &[0], Some("2000-01-01"), &mut cache)
+            .unwrap();
+        let file = String::from_utf8(file).unwrap();
+        assert!(
+            file.contains(
+                "\"revision\": \"9\",\n      \"separate_application_timing\": true,\n      \"status\": \"confirmed\""
+            ),
+            "{file}"
+        );
+        let revision = manifest_revision(plan);
+        assert!(
+            revision.contains(
+                "\"revision\":\"9\",\"separate_application_timing\":true,\"status\":\"confirmed\""
+            ),
+            "{revision}"
+        );
+    }
+
+    #[test]
+    fn separate_timing_leaves_a_revision_whose_date_was_taken_away() {
+        let mut plan = separate_timing_plan();
+        plan.revisions[0].occurrences[0].leave_unresolved("taken away", "test");
+        let found = plan.occurrence(0);
+        assert_eq!(found.status, "unresolved");
+        // The step that takes the date away keeps the list.
+        assert_eq!(
+            found.date_evidence["separate_application_timing"],
+            json!([SEPARATE_TIMING_SENTENCE])
+        );
+        let body = String::from_utf8(plan.replay_body(0).unwrap()).unwrap();
+        assert!(!body.contains("별도적용시기"), "{body}");
+        let mut revision = plan.revisions[0].clone();
+        DatePlan::summarize(&mut revision);
+        assert!(!revision.separate_application_timing);
+    }
+
+    #[test]
+    fn separate_timing_mark_follows_the_final_evidence() {
+        let plan = separate_timing_plan();
+        let mut revision = plan.revisions[0].clone();
+        DatePlan::summarize(&mut revision);
+        assert!(revision.separate_application_timing);
+        // A step that replaces the evidence (as `defer_late_label_dates` does) removes the list.
+        revision.occurrences[0].date_evidence = json!({"decision": "replaced"});
+        DatePlan::summarize(&mut revision);
+        assert!(!revision.separate_application_timing);
+    }
+
+    #[test]
+    fn separate_timing_lines_follow_the_llm_sentence() {
+        // No real path gives an LLM date and the list together; this fixes the line order for
+        // a later change that does.
+        let mut plan = separate_timing_plan();
+        let found = &mut plan.revisions[0].occurrences[0];
+        found.status = "llm".to_owned();
+        found.date_evidence["llm_judgment"] = json!({"quote": "q"});
+        let body = String::from_utf8(plan.replay_body(0).unwrap()).unwrap();
+        let llm = body.find("시행일근거문장: \"q\"\n").expect("llm line");
+        let mark = body.find("별도적용시기: true\n").expect("mark line");
+        assert!(llm < mark, "{body}");
     }
 
     /// Builds a small enforcement plan: id1 has a confirmed and an unresolved revision,
