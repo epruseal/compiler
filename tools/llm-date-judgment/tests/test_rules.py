@@ -1,5 +1,5 @@
-"""Tests from the post-implementation review of the first commit: counterexamples of the review and of
-the surviving mutations. Each test fails when the behaviour it names is removed."""
+"""Rule tests of the checks, the ledger, the runner and the queue build. Each test fails when the
+behaviour it names is removed."""
 import json
 import os
 import shutil
@@ -22,7 +22,7 @@ POLICY = {'model': 'm1', 'effort': 'default', 'prompt_version': 'p', 'runner_ver
 FKEY = '|'.join(('admrules', '2111925', ADM, ADM_SHA))
 
 
-def FKEY_OF(target):
+def fkey_of(target):
     return '|'.join(target['key'][f] for f in ledger.KEY_FIELDS)
 
 
@@ -87,7 +87,7 @@ class FinalEndingFollower(unittest.TestCase):
 
 
 class SurvivingMutations(unittest.TestCase):
-    """Counterexamples of the review execution channel for the surviving mutations."""
+    """Quotation tracking, calendar, verb stem, label and promulgation dates, sections."""
 
     def test_quotation_tracking(self):
         cases = [
@@ -417,6 +417,7 @@ class RunnerFixes(Env):
         fails = self.failure_file()
         self.assertEqual(fails['counts'], {k: 0 for k in bad_keys})
         self.assertEqual((sorted(fails['last_stop']), sorted(fails['forgiven'])), (bad_keys, bad_keys))
+        self.assertEqual(sorted(fails['errors']), bad_keys)
 
     def test_retry_reset_is_written_even_when_no_call_fails(self):
         """The retry calls succeed and the run stops at --max-calls: the emptied record is on disk."""
@@ -469,8 +470,10 @@ class RunnerFixes(Env):
         self.assertEqual(self.failure_file(), {'counts': {}, 'last_stop': [], 'forgiven': [], 'errors': {}})
 
     def test_failed_entry_takes_a_new_failure_count(self):
-        """A failed entry of a first cycle (failures 3); after a retry the same target ends a new cycle with
-        failures 4 and the same error (a first stop takes a failure back, the same stop adds it again)."""
+        """After a retry, a new cycle ends with failures 4 and the same error: the failed entry takes 4.
+
+        The first cycle gives failures 3. In the new cycle a first stop takes a failure back and the same
+        stop adds it again."""
         bad = self.bad_copies(5)
         x, others, good = bad[0], bad[1:], self.target()
         self.set_targets([x, good])
@@ -482,7 +485,7 @@ class RunnerFixes(Env):
         self.set_targets([x] + others)
         for _ in range(3):
             self.run_report()
-        self.assertEqual(self.failure_file()['counts'][FKEY_OF(x)], 4)
+        self.assertEqual(self.failure_file()['counts'][fkey_of(x)], 4)
         self.assertEqual(self.failed_rows(), [('m1', 4, True)])
 
     def test_failed_entry_takes_the_new_policy(self):
@@ -606,7 +609,7 @@ class RunnerFixes(Env):
         self.assertEqual(e['usage']['total_cost_usd'], 0.01)
 
     def test_old_runner_entry_that_fails_recheck_is_judged_again(self):
-        """Review of the restore rule: an entry of an old runner whose recheck cannot read its source path
+        """Restore rule: an entry of an old runner whose recheck cannot read its source path
         is judged again, not restored from its own raw response."""
         self.run_report()
         judge.RUNNER_VERSION = 'r9'

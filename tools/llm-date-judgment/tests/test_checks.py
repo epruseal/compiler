@@ -197,7 +197,7 @@ class PredicateAndQuotes(unittest.TestCase):
 
 
 class FieldReadPredicates(unittest.TestCase):
-    """Counterexamples of the v2.4 B3 post-fix check: the predicate is read in the field."""
+    """The predicate is read in the field, not at the end of the quote."""
 
     def check_explicit(self, text, quote, value, field='부칙'):
         return checks.check(judgment('explicit_date', value, quote, field=field), meta('2000-01-01'), {field: text})
