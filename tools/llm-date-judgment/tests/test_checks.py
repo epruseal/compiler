@@ -1,4 +1,4 @@
-"""Unit tests of the mechanical checks. The first three cases are the design-v1 counterexamples."""
+"""Unit tests of the mechanical checks."""
 import sys
 import unittest
 from pathlib import Path
@@ -157,7 +157,7 @@ class FollowupForms(unittest.TestCase):
 
 
 class PredicateAndQuotes(unittest.TestCase):
-    """Counterexamples of the design re-check: attributive and nominal verb forms."""
+    """The checks refuse attributive and nominal verb forms, quoted text and amendment instructions."""
 
     def test_attributive_verb_after_date_is_not_a_clause(self):
         text = '부칙\n제1조(시행일) 이 규칙은 공포한 날부터 시행한다.\n제2조(적용례) 이 규칙은 2012년 1월 1일부터 시행되는 임용시험부터 적용한다.'
@@ -197,7 +197,7 @@ class PredicateAndQuotes(unittest.TestCase):
 
 
 class FieldReadPredicates(unittest.TestCase):
-    """The predicate is read in the field, not at the end of the quote."""
+    """The checks read the predicate in the field, not at the end of the quote."""
 
     def check_explicit(self, text, quote, value, field='부칙'):
         return checks.check(judgment('explicit_date', value, quote, field=field), meta('2000-01-01'), {field: text})

@@ -86,7 +86,7 @@ class FinalEndingFollower(unittest.TestCase):
         self.assertFalse(adoptable(J('explicit_date', '2012-01-01', '2012. 1. 1.부터 시행한다'), M('2011-12-01'), {'부칙': text}))
 
 
-class SurvivingMutations(unittest.TestCase):
+class SourceChecks(unittest.TestCase):
     """Quotation tracking, calendar, verb stem, label and promulgation dates, sections."""
 
     def test_quotation_tracking(self):
@@ -609,8 +609,8 @@ class RunnerFixes(Env):
         self.assertEqual(e['usage']['total_cost_usd'], 0.01)
 
     def test_old_runner_entry_that_fails_recheck_is_judged_again(self):
-        """Restore rule: an entry of an old runner whose recheck cannot read its source path
-        is judged again, not restored from its own raw response."""
+        """Restore rule: the runner judges again an entry of an old runner whose recheck cannot read its
+        source path; it does not restore the entry from its own raw response."""
         self.run_report()
         judge.RUNNER_VERSION = 'r9'
         moved = self.cache / 'admrule' / 'moved.xml'
