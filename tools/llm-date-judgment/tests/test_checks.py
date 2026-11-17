@@ -124,7 +124,7 @@ class Undated(unittest.TestCase):
 
 
 class FollowupForms(unittest.TestCase):
-    """compiler#1 follow-up items that the lead marked as LLM targets (followup-candidates-issue1.md)."""
+    """Date forms that compiler#1 left to the LLM: mixed notations, dates without a year, quoted instructions."""
 
     def accept(self, quote, value, field_text=None):
         text = field_text if field_text is not None else '부칙\n' + quote
