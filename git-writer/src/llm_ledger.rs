@@ -359,6 +359,24 @@ mod tests {
     }
 
     #[test]
+    fn a_ledger_with_only_cross_checks_is_not_empty() {
+        // A ledger that holds only usable cross-checks still changes the build, so it is not
+        // empty; neither is one that holds only judgments.
+        let only_cross = LlmLedger::parse(
+            ledger(&cross("11", "cross-sentence")).as_bytes(),
+            "ordinances",
+        )
+        .unwrap();
+        assert_eq!((only_cross.len(), only_cross.cross_len()), (0, 1));
+        assert!(!only_cross.is_empty());
+        let only_judged =
+            LlmLedger::parse(ledger(&judged("10", "")).as_bytes(), "ordinances").unwrap();
+        assert!(!only_judged.is_empty());
+        let none = LlmLedger::parse(ledger("").as_bytes(), "ordinances").unwrap();
+        assert!(none.is_empty());
+    }
+
+    #[test]
     fn refuses_a_cross_check_without_its_recorded_result() {
         let text = ledger(
             &cross("11", "cross-sentence")
