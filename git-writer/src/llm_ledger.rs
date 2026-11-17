@@ -3,8 +3,10 @@
 //! The judge (`tools/llm-date-judgment/judge.py`) writes one canonical ledger file per dataset:
 //! `<ops>/ledger/<dataset>.json`. The compiler reads only that file, never the journal. This
 //! module checks the format and keeps the entries that the integration may use: judged entries
-//! whose dates passed the mechanical checks, made under the policy of the ledger, for revisions
-//! that the parser could not date (category `judge`, phase 1). Every other entry stays out.
+//! whose dates passed the mechanical checks, made under the policy of the ledger. Entries for
+//! revisions that the parser could not date (category `judge`, phase 1) can give a date. Entries
+//! of the phase 2 cross-check (categories `cross-*`) can only take a parser date away
+//! (design-v3.5-crosscheck.md 2). Every other entry stays out.
 
 use std::collections::{BTreeMap, HashMap};
 use std::path::Path;
@@ -18,6 +20,11 @@ const SCHEMA_VERSION: u64 = 1;
 const POLICY_KEYS: [&str; 4] = ["model", "effort", "prompt_version", "runner_version"];
 /// The key fields of an entry.
 const KEY_FIELDS: [&str; 4] = ["dataset", "identity", "revision", "source_sha256"];
+/// The parser category of a phase 1 judgment: the parser could not date the revision.
+const JUDGE_CATEGORIES: [&str; 1] = ["judge"];
+/// The parser categories of a phase 2 cross-check: the parser dated the revision without a source
+/// effective date.
+const CROSS_CATEGORIES: [&str; 3] = ["cross-sentence", "cross-default", "cross-arrival"];
 
 /// What the parser gave when the revision was judged (the manifest of that time).
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -53,6 +60,9 @@ pub struct LlmEntry {
     pub parser: RecordedParser,
     /// When the judgment was made.
     pub judged_at: String,
+    /// The cross-check result the judge recorded (an entry field). Only cross-check entries
+    /// carry it.
+    pub cross_check_at_judgment: Option<String>,
 }
 
 /// The usable judgments of one dataset and what identifies the ledger they came from.
@@ -66,8 +76,12 @@ pub struct LlmLedger {
     pub policy: BTreeMap<String, String>,
     /// The SHA-256 of the protection list the ledger was compacted with.
     pub protected_list_sha256: Option<String>,
-    /// Usable entries by (identity, revision, source SHA-256).
+    /// Usable phase 1 entries by (identity, revision, source SHA-256).
     entries: HashMap<(String, String, String), LlmEntry>,
+    /// Usable cross-check entries by (identity, revision, source SHA-256). They are kept apart
+    /// from `entries`: `llm_approval` would add `llm_not_applied` evidence to every dated
+    /// cross-check revision (design-v3.5-crosscheck.md 2).
+    cross: HashMap<(String, String, String), LlmEntry>,
 }
 
 impl LlmLedger {
@@ -124,6 +138,7 @@ impl LlmLedger {
         let list = doc["entries"].as_array().context("ledger entries")?;
         let mut previous: Option<Vec<String>> = None;
         let mut entries = HashMap::new();
+        let mut cross = HashMap::new();
         for entry in list {
             let key = entry["key"].as_object().context("entry key")?;
             ensure!(key.len() == KEY_FIELDS.len(), "entry key fields");
@@ -147,11 +162,11 @@ impl LlmLedger {
                 matches!(kind, "judged" | "excluded" | "failed"),
                 "entry kind must be judged, excluded or failed"
             );
-            if let Some(usable) = usable(entry, kind, &policy)? {
-                entries.insert(
-                    (parts[1].clone(), parts[2].clone(), parts[3].clone()),
-                    usable,
-                );
+            let key = (parts[1].clone(), parts[2].clone(), parts[3].clone());
+            if let Some(usable) = usable(entry, kind, &policy, &JUDGE_CATEGORIES)? {
+                entries.insert(key, usable);
+            } else if let Some(usable) = usable(entry, kind, &policy, &CROSS_CATEGORIES)? {
+                cross.insert(key, usable);
             }
         }
         Ok(Self {
@@ -160,6 +175,7 @@ impl LlmLedger {
             policy,
             protected_list_sha256,
             entries,
+            cross,
         })
     }
 
@@ -169,14 +185,28 @@ impl LlmLedger {
             .get(&(identity.to_owned(), revision.to_owned(), copy_id.to_owned()))
     }
 
-    /// Tells whether any usable judgment names this revision, whatever the copy.
+    /// The usable cross-check entry of one exact source copy.
+    pub fn find_cross(&self, identity: &str, revision: &str, copy_id: &str) -> Option<&LlmEntry> {
+        self.cross
+            .get(&(identity.to_owned(), revision.to_owned(), copy_id.to_owned()))
+    }
+
+    /// Tells whether any usable judgment or cross-check names this revision, whatever the copy.
     pub fn names_revision(&self, revision: &str) -> bool {
-        self.entries.keys().any(|(_, named, _)| named == revision)
+        self.entries
+            .keys()
+            .chain(self.cross.keys())
+            .any(|(_, named, _)| named == revision)
     }
 
     /// The number of usable judgments.
     pub fn len(&self) -> usize {
         self.entries.len()
+    }
+
+    /// The number of usable cross-check entries.
+    pub fn cross_len(&self) -> usize {
+        self.cross.len()
     }
 
     /// Tells whether no judgment is usable.
@@ -187,11 +217,13 @@ impl LlmLedger {
 
 /// The usable judgment of an entry, or nothing. An entry is usable when it is judged, its date
 /// passed the mechanical checks (`adoptable`), it was made under the policy of the ledger head,
-/// and the parser could not date the revision when it was judged (category `judge`).
+/// and its parser category is one of `categories`. A cross-check entry must carry the entry field
+/// `cross_check_at_judgment`.
 fn usable(
     entry: &Value,
     kind: &str,
     policy: &BTreeMap<String, String>,
+    categories: &[&str],
 ) -> Result<Option<LlmEntry>> {
     if kind != "judged" || entry["adoptable"] != Value::Bool(true) {
         return Ok(None);
@@ -203,9 +235,22 @@ fn usable(
         return Ok(None);
     }
     let parser = &entry["parser_at_judgment"];
-    if parser["category"] != "judge" {
+    if !categories
+        .iter()
+        .any(|category| parser["category"] == *category)
+    {
         return Ok(None);
     }
+    let cross_check_at_judgment = if categories == CROSS_CATEGORIES {
+        Some(
+            entry["cross_check_at_judgment"]
+                .as_str()
+                .context("cross-check entry lacks cross_check_at_judgment")?
+                .to_owned(),
+        )
+    } else {
+        None
+    };
     let judgment = &entry["judgment"];
     let text = |value: &Value, name: &str| -> Result<String> {
         value
@@ -232,6 +277,7 @@ fn usable(
             rule: text(&parser["rule"], "parser rule")?,
         },
         judged_at: text(&entry["judged_at"], "judged_at")?,
+        cross_check_at_judgment,
     }))
 }
 
@@ -251,14 +297,20 @@ mod tests {
         )
     }
 
+    fn cross(revision: &str, category: &str) -> String {
+        judged(revision, r#", "cross_check_at_judgment": "disagree""#).replace(
+            r#""category": "judge""#,
+            &format!(r#""category": "{category}""#),
+        )
+    }
+
     #[test]
     fn keeps_only_usable_phase_one_judgments() {
         let text = ledger(
             &[
                 judged("10", ""),
                 judged("11", "").replace(r#""adoptable": true"#, r#""adoptable": false"#),
-                judged("12", "")
-                    .replace(r#""category": "judge""#, r#""category": "cross-sentence""#),
+                cross("12", "cross-sentence"),
                 judged("13", "").replace(r#""model": "m""#, r#""model": "other""#),
                 judged("14", "").replace(r#""kind": "judged""#, r#""kind": "failed""#),
             ]
@@ -270,8 +322,49 @@ mod tests {
         assert_eq!(entry.date, "2011-04-07");
         assert_eq!(entry.parser.status, "unresolved");
         assert_eq!(entry.parser.date, None);
+        assert_eq!(entry.cross_check_at_judgment, None);
+        assert!(read.find("1", "12", "a").is_none());
         assert!(read.names_revision("10"));
         assert!(!read.names_revision("11"));
+    }
+
+    #[test]
+    fn keeps_usable_cross_checks_in_their_own_map() {
+        // design-v3.5-crosscheck.md 2: the three cross categories go to the cross-check map,
+        // the judge category to the judgment map, an entry that is not adoptable to neither.
+        let text = ledger(
+            &[
+                judged("10", ""),
+                cross("11", "cross-sentence"),
+                cross("12", "cross-default"),
+                cross("13", "cross-arrival"),
+                cross("14", "cross-sentence")
+                    .replace(r#""adoptable": true"#, r#""adoptable": false"#),
+                cross("15", "other"),
+            ]
+            .join(","),
+        );
+        let read = LlmLedger::parse(text.as_bytes(), "ordinances").unwrap();
+        assert_eq!((read.len(), read.cross_len()), (1, 3));
+        for revision in ["11", "12", "13"] {
+            let entry = read.find_cross("1", revision, "a").unwrap();
+            assert_eq!(entry.cross_check_at_judgment.as_deref(), Some("disagree"));
+            assert!(read.find("1", revision, "a").is_none());
+            assert!(read.names_revision(revision));
+        }
+        assert!(read.find_cross("1", "10", "a").is_none());
+        assert!(read.find_cross("1", "14", "a").is_none());
+        assert!(!read.names_revision("14"));
+        assert!(!read.names_revision("15"));
+    }
+
+    #[test]
+    fn refuses_a_cross_check_without_its_recorded_result() {
+        let text = ledger(
+            &cross("11", "cross-sentence")
+                .replace(r#", "cross_check_at_judgment": "disagree""#, ""),
+        );
+        assert!(LlmLedger::parse(text.as_bytes(), "ordinances").is_err());
     }
 
     #[test]

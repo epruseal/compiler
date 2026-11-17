@@ -3233,6 +3233,40 @@ fn identity_lines(dataset: &str, identity: &str, revision: &str) -> String {
     }
 }
 
+/// The message of a revision commit and of a repeal deletion commit in the enforcement replay. It
+/// reads only these values of the revision row and the event date, so two rows with the same
+/// values give the same message (design-v3.5-crosscheck.md 8 and 9.1).
+#[allow(clippy::too_many_arguments)]
+fn revision_commit_message(
+    dataset: &str,
+    category: &str,
+    name: &str,
+    identity: &str,
+    revision: &str,
+    status: &str,
+    reason: &str,
+    date: &str,
+) -> String {
+    format!(
+        "{}: {}{}\n\nrevision: {}\nevent_date: {}\nstatus: {}\nreason: {}\n\n{}Effective-Date: {}",
+        category,
+        name,
+        if status == "estimated" {
+            " (추정)"
+        } else if status == "llm" {
+            " (LLM 판단)"
+        } else {
+            ""
+        },
+        revision,
+        date,
+        status,
+        reason,
+        identity_lines(dataset, identity, revision),
+        date
+    )
+}
+
 /// What selects no LLM date: the evidence `llm_not_applied`.
 fn llm_not_applied(reason: &str, detail: Value) -> Value {
     let mut value = json!({"reason": reason, "decision": "lead-c2-integration-contract-20261117"});
@@ -7057,7 +7091,8 @@ impl DatePlan {
             llm: llm.map(|ledger| {
                 json!({"ledger": format!("ledger/{}.json", ledger.dataset), "sha256": ledger.sha256,
                     "policy": ledger.policy, "protected_list_sha256": ledger.protected_list_sha256,
-                    "usable_judgments": ledger.len(), "decision": "lead-c2-integration-contract-20261117"})
+                    "usable_judgments": ledger.len(), "usable_cross_checks": ledger.cross_len(),
+                    "decision": "lead-c2-integration-contract-20261117"})
             }),
         };
         let mut copies = BTreeMap::new();
@@ -7120,17 +7155,32 @@ impl DatePlan {
         if enforcement {
             plan.leave_revived_unresolved();
         }
-        if plan.llm.is_some() {
+        if let Some(ledger) = llm {
             plan.mark_llm_dates();
+            plan.check_llm_cross(ledger);
+        }
+        plan.assign_ranks()?;
+        plan.validate_occurrences()?;
+        Ok(plan)
+    }
+
+    /// Gives every occurrence its rank in the promulgation order and in the enforcement order of
+    /// the final plan. An occurrence outside an order has no rank.
+    fn assign_ranks(&mut self) -> Result<()> {
+        for revision in &mut self.revisions {
+            for occurrence in &mut revision.occurrences {
+                occurrence.promulgation_rank = None;
+                occurrence.enforcement_rank = None;
+            }
         }
         for enforcement in [false, true] {
-            for (rank, source) in plan.ordered(enforcement).into_iter().enumerate() {
+            for (rank, source) in self.ordered(enforcement).into_iter().enumerate() {
                 ensure!(
                     rank as u64 <= 9_007_199_254_740_991,
                     "date rank exceeds the contract range"
                 );
-                let occurrence = &mut plan.revisions[plan.source_revision[source]].occurrences
-                    [plan.source_occurrence[source]];
+                let occurrence = &mut self.revisions[self.source_revision[source]].occurrences
+                    [self.source_occurrence[source]];
                 if enforcement {
                     occurrence.enforcement_rank = Some(rank as u64);
                 } else {
@@ -7138,8 +7188,7 @@ impl DatePlan {
                 }
             }
         }
-        plan.validate_occurrences()?;
-        Ok(plan)
+        Ok(())
     }
 
     /// Leaves unresolved a revision whose label date is on or after the promulgation date of
@@ -7358,6 +7407,249 @@ impl DatePlan {
             revision.enforcement_date = first.enforcement_date;
             revision.reason = first.reason;
             revision.date_evidence = first.date_evidence;
+        }
+    }
+
+    /// Compares the parser date of each revision copy with the usable cross-check of the ledger
+    /// (design-v3.5-crosscheck.md 4 and 5, `lead-c2-crosscheck-demote-20261117`). A cross-check
+    /// never gives a date. When the LLM date differs from the final parser date, every dated copy
+    /// of that revision becomes unresolved (undated without a promulgation date) with both
+    /// candidate dates. Agreement and a cross-check that does not apply only add the evidence
+    /// `llm_cross_check`. It runs after every other processing of the plan and before the ranks.
+    fn check_llm_cross(&mut self, ledger: &crate::llm_ledger::LlmLedger) {
+        // The next revision of an identity, in the order key of `check_llm_next_revisions`.
+        let key = |plan: &Self, source: usize| -> Option<(String, u64, String)> {
+            Some((
+                plan.occurrence(source).promulgation_date.clone()?,
+                plan.sources[source].serial,
+                plan.sources[source].revision.clone(),
+            ))
+        };
+        let mut by_identity: BTreeMap<String, Vec<(String, u64, String)>> = BTreeMap::new();
+        let mut first_source = vec![usize::MAX; self.revisions.len()];
+        for source in 0..self.sources.len() {
+            if self.source_occurrence[source] == 0 {
+                first_source[self.source_revision[source]] = source;
+            }
+            if let Some(key) = key(self, source) {
+                by_identity
+                    .entry(self.sources[source].identity.clone())
+                    .or_default()
+                    .push(key);
+            }
+        }
+        for keys in by_identity.values_mut() {
+            keys.sort();
+            keys.dedup();
+        }
+        // The result of each copy that has a usable cross-check: the evidence and, for a
+        // disagreement, the LLM date.
+        let mut results: Vec<Option<(Value, Option<String>)>> = vec![None; self.revisions.len()];
+        for (index, revision) in self.revisions.iter().enumerate() {
+            let Some(entry) =
+                ledger.find_cross(&revision.identity, &revision.revision, &revision.copy_id)
+            else {
+                continue;
+            };
+            let mut evidence = json!({
+                "decision": "lead-c2-crosscheck-demote-20261117",
+                "ledger_sha256": ledger.sha256,
+                "model": ledger.policy.get("model"),
+                "effort": ledger.policy.get("effort"),
+                "prompt_version": ledger.policy.get("prompt_version"),
+                "runner_version": ledger.policy.get("runner_version"),
+                "judged_at": entry.judged_at,
+                "cross_check_at_judgment": entry.cross_check_at_judgment,
+                "parser_status": entry.parser.status,
+                "parser_date": entry.parser.date,
+                "parser_rule": entry.parser.rule,
+                "llm_date": entry.date,
+                "llm_outcome": entry.outcome,
+                "field": entry.field,
+                "quote": entry.quote,
+                "section_label": entry.section_label,
+            });
+            let first = &revision.occurrences[0];
+            let not_applied = |reason: &str, detail: Value| -> (Value, Option<String>) {
+                let mut value = evidence.clone();
+                if let Some(object) = value.as_object_mut() {
+                    object.insert("result".to_owned(), json!("not-applied"));
+                    object.insert("reason".to_owned(), json!(reason));
+                    if let Some(more) = detail.as_object() {
+                        object.extend(more.clone());
+                    }
+                }
+                (value, None)
+            };
+            // 4.2: only a copy whose occurrences are all dated by the parser.
+            if !revision
+                .occurrences
+                .iter()
+                .all(|occurrence| matches!(occurrence.status.as_str(), "confirmed" | "estimated"))
+            {
+                results[index] = Some(not_applied("parser-not-dated", json!({})));
+                continue;
+            }
+            // 4.3 (B3): the final parser result is the one the judge saw.
+            if (
+                first.status.as_str(),
+                first.enforcement_date.as_deref(),
+                first.reason.as_str(),
+            ) != (
+                entry.parser.status.as_str(),
+                entry.parser.date.as_deref(),
+                entry.parser.rule.as_str(),
+            ) {
+                results[index] = Some(not_applied(
+                    "chain-changed",
+                    json!({"observed": {"status": first.status, "date": first.enforcement_date, "rule": first.reason},
+                        "expected": {"status": entry.parser.status, "date": entry.parser.date, "rule": entry.parser.rule}}),
+                ));
+                continue;
+            }
+            // 4.4: the next revision is the one the judge used.
+            let source = first_source[index];
+            if let Some(own) = key(self, source) {
+                let keys = &by_identity[&revision.identity];
+                let next = keys.iter().find(|other| **other > own);
+                let strict = keys
+                    .iter()
+                    .find(|other| other.0 > own.0)
+                    .map(|other| other.0.clone());
+                let detail = json!({"recorded_next_promulgation": entry.next_promulgation,
+                    "actual_next_promulgation": strict, "actual_next_revision": next.map(|next| next.2.clone())});
+                if next.is_some_and(|next| next.0 == own.0) {
+                    results[index] = Some(not_applied("next-revision-definition", detail));
+                    continue;
+                }
+                if strict != entry.next_promulgation {
+                    results[index] = Some(not_applied("next-revision-changed", detail));
+                    continue;
+                }
+            }
+            // 4.5: the same date or not.
+            let Some(date) = compact_date(&entry.date) else {
+                results[index] = Some(not_applied("invalid-date", json!({"date": entry.date})));
+                continue;
+            };
+            let date = iso(date);
+            let agree = first.enforcement_date.as_deref() == Some(date.as_str());
+            if let Some(object) = evidence.as_object_mut() {
+                object.insert(
+                    "result".to_owned(),
+                    json!(if agree { "agree" } else { "disagree" }),
+                );
+            }
+            results[index] = Some((evidence, (!agree).then_some(date)));
+        }
+        // 4.6: one disagreeing copy takes the date away from every dated copy of the revision.
+        let mut groups: BTreeMap<(String, String), Vec<usize>> = BTreeMap::new();
+        for (index, revision) in self.revisions.iter().enumerate() {
+            groups
+                .entry((revision.identity.clone(), revision.revision.clone()))
+                .or_default()
+                .push(index);
+        }
+        let mut withdrawn: BTreeSet<(String, String)> = BTreeSet::new();
+        for (group, members) in &groups {
+            let llm_dates: BTreeSet<String> = members
+                .iter()
+                .filter_map(|index| results[*index].as_ref()?.1.clone())
+                .collect();
+            if llm_dates.is_empty() {
+                continue;
+            }
+            let disagree_copy_ids: Vec<String> = members
+                .iter()
+                .filter(|index| {
+                    results[**index]
+                        .as_ref()
+                        .is_some_and(|(_, date)| date.is_some())
+                })
+                .map(|index| self.revisions[*index].copy_id.clone())
+                .collect();
+            for index in members {
+                let revision = &self.revisions[*index];
+                if !revision.occurrences.iter().any(|occurrence| {
+                    matches!(occurrence.status.as_str(), "confirmed" | "estimated")
+                }) {
+                    continue;
+                }
+                let first = &revision.occurrences[0];
+                let parser_status = first.status.clone();
+                let parser_date = first.enforcement_date.clone();
+                let own = results[*index].take();
+                let mut evidence = match own {
+                    Some((evidence, Some(_))) => evidence,
+                    Some((evidence, None)) => json!({"result": "copy-withheld",
+                        "decision": "lead-c2-crosscheck-demote-20261117", "own": evidence}),
+                    None => json!({"result": "copy-withheld",
+                        "decision": "lead-c2-crosscheck-demote-20261117"}),
+                };
+                let mut candidates =
+                    vec![json!({"source": "parser", "date": parser_date, "status": parser_status})];
+                candidates.extend(
+                    llm_dates
+                        .iter()
+                        .map(|date| json!({"source": "llm", "date": date})),
+                );
+                if let Some(object) = evidence.as_object_mut() {
+                    if object["result"] == "copy-withheld" {
+                        object.insert("disagree_copy_ids".to_owned(), json!(disagree_copy_ids));
+                    }
+                    object.insert("candidate_dates".to_owned(), json!(candidates));
+                }
+                let reason = format!(
+                    "effective date is unresolved; LLM 교차 확인 불일치: 파서 {}, LLM {}",
+                    parser_date.as_deref().unwrap_or(""),
+                    llm_dates.iter().cloned().collect::<Vec<_>>().join(", ")
+                );
+                let target = &mut self.revisions[*index];
+                for occurrence in &mut target.occurrences {
+                    if matches!(occurrence.status.as_str(), "confirmed" | "estimated") {
+                        occurrence.leave_unresolved(&reason, "llm-cross-check");
+                    }
+                }
+                results[*index] = Some((evidence, None));
+            }
+            withdrawn.insert(group.clone());
+        }
+        for (index, result) in results.into_iter().enumerate() {
+            let Some((evidence, _)) = result else {
+                continue;
+            };
+            let target = &mut self.revisions[index];
+            for occurrence in &mut target.occurrences {
+                if let Some(object) = occurrence.date_evidence.as_object_mut() {
+                    object.insert("llm_cross_check".to_owned(), evidence.clone());
+                }
+            }
+            let first = target.occurrences[0].clone();
+            target.status = Some(first.status);
+            target.enforcement_date = first.enforcement_date;
+            target.reason = first.reason;
+            target.date_evidence = first.date_evidence;
+        }
+        // 6: a withdrawn repeal that the repeal-before-effective rule named for another revision.
+        let mut refs = Vec::new();
+        for revision in &self.revisions {
+            for occurrence in &revision.occurrences {
+                let Some(repeal) =
+                    occurrence.date_evidence["repeal_before_effective"]["repeal_revision"].as_str()
+                else {
+                    continue;
+                };
+                if withdrawn.contains(&(revision.identity.clone(), repeal.to_owned())) {
+                    refs.push(json!({"revision": {"identity": revision.identity, "revision": revision.revision},
+                        "repeal": {"identity": revision.identity, "revision": repeal}}));
+                }
+            }
+        }
+        refs.dedup();
+        if !refs.is_empty()
+            && let Some(object) = self.llm.as_mut().and_then(Value::as_object_mut)
+        {
+            object.insert("cross_check_repeal_refs".to_owned(), json!(refs));
         }
     }
 
@@ -7815,23 +8107,15 @@ impl DatePlan {
                     changed.insert(source.identity.clone());
                     let occurrence = self.occurrence(source_index);
                     let unresolved = occurrence.status == "unresolved";
-                    let message = format!(
-                        "{}: {}{}\n\nrevision: {}\nevent_date: {}\nstatus: {}\nreason: {}\n\n{}Effective-Date: {}",
-                        source.category,
-                        source.name,
-                        if occurrence.status == "estimated" {
-                            " (추정)"
-                        } else if occurrence.status == "llm" {
-                            " (LLM 판단)"
-                        } else {
-                            ""
-                        },
-                        source.revision,
-                        date,
-                        occurrence.status,
-                        occurrence.reason,
-                        identity_lines(&self.dataset, &source.identity, &source.revision),
-                        date
+                    let message = revision_commit_message(
+                        &self.dataset,
+                        &source.category,
+                        &source.name,
+                        &source.identity,
+                        &source.revision,
+                        &occurrence.status,
+                        &occurrence.reason,
+                        &date,
                     );
                     if source.repeal && !unresolved {
                         let deletions = paths
@@ -20355,5 +20639,314 @@ mod llm_tests {
             serde_json::to_value(&with.revisions).unwrap()
         );
         assert!(plain.llm.is_none() && with.llm.is_none());
+    }
+
+    /// One cross-check pick: (source index, LLM date, recorded next promulgation, category).
+    type Pick<'a> = (usize, &'a str, Option<&'a str>, &'a str);
+
+    /// A ledger of cross-check entries that record, as the parser result at judgment time, what
+    /// the plan without a ledger gives now (so B3 holds), unless `rule` overrides the rule.
+    fn cross_ledger(plain: &DatePlan, picks: &[Pick], rule: Option<&str>) -> LlmLedger {
+        let mut entries: Vec<Value> = picks
+            .iter()
+            .map(|(index, date, next, category)| {
+                let source = &plain.sources[*index];
+                let occurrence = plain.occurrence(*index);
+                let copy_id = &plain.revisions[plain.source_revision[*index]].copy_id;
+                json!({"key": {"dataset": "ordinances", "identity": source.identity, "revision": source.revision,
+                        "source_sha256": copy_id},
+                    "kind": "judged", "adoptable": true, "date": date, "cross_check_at_judgment": "disagree",
+                    "model": "m", "effort": "default", "prompt_version": "p", "runner_version": "r2", "judged_at": "t",
+                    "inputs": {"next_promulgation": next},
+                    "parser_at_judgment": {"category": category, "status": occurrence.status,
+                        "date": occurrence.enforcement_date, "rule": rule.unwrap_or(&occurrence.reason)},
+                    "judgment": {"outcome": "explicit_date", "basis_field": "부칙", "basis_quote": "q",
+                        "section_label": "", "proviso": false, "proviso_quote": ""}})
+            })
+            .collect();
+        entries.sort_by_key(|entry| {
+            ["dataset", "identity", "revision", "source_sha256"]
+                .map(|field| entry["key"][field].as_str().unwrap().to_owned())
+        });
+        let doc = json!({"schema_version": 1, "dataset": "ordinances",
+            "policy": {"model": "m", "effort": "default", "prompt_version": "p", "runner_version": "r2"},
+            "protected_list_sha256": null, "entries": entries});
+        LlmLedger::parse(&serde_json::to_vec(&doc).unwrap(), "ordinances").unwrap()
+    }
+
+    /// A source that the parser dates from its own effective date (B3 compares only the status,
+    /// the date and the rule, whatever the category).
+    fn dated(revision: &str, promulgation: &str, effective: &str) -> SourceRevision {
+        source(
+            revision,
+            promulgation,
+            effective,
+            "일부개정",
+            "부칙\n이 조례는 공포한 날부터 시행한다.",
+        )
+    }
+
+    fn without(sources: &[SourceRevision]) -> DatePlan {
+        DatePlan::new_with("ordinances", true, sources.to_vec(), None).unwrap()
+    }
+
+    fn cross(found: &Occurrence) -> &Value {
+        &found.date_evidence["llm_cross_check"]
+    }
+
+    /// The evidence of an occurrence without `llm_cross_check`.
+    fn other_evidence(found: &Occurrence) -> Value {
+        let mut evidence = found.date_evidence.clone();
+        evidence.as_object_mut().unwrap().remove("llm_cross_check");
+        evidence
+    }
+
+    #[test]
+    fn a_cross_check_disagreement_takes_the_parser_date_away() {
+        // 804764 form: the parser date and the LLM date differ, so both become candidates.
+        let one = dated("700101", "20110101", "20110301");
+        let plain = without(std::slice::from_ref(&one));
+        assert_eq!(
+            plain.occurrence(0).enforcement_date.as_deref(),
+            Some("2011-03-01")
+        );
+        let ledger = cross_ledger(&plain, &[(0, "2011-01-01", None, "cross-sentence")], None);
+        let built = plan(vec![one], &ledger);
+        let found = built.occurrence(0);
+        assert_eq!(
+            (found.status.as_str(), found.enforcement_date.as_deref()),
+            ("unresolved", None)
+        );
+        assert_eq!(
+            found.reason,
+            "effective date is unresolved; LLM 교차 확인 불일치: 파서 2011-03-01, LLM 2011-01-01"
+        );
+        assert_eq!(found.date_evidence["date_withheld"], "llm-cross-check");
+        assert_eq!(cross(found)["result"], "disagree");
+        assert_eq!(cross(found)["cross_check_at_judgment"], "disagree");
+        assert_eq!(
+            cross(found)["candidate_dates"],
+            json!([{"source": "parser", "date": "2011-03-01", "status": "confirmed"},
+                {"source": "llm", "date": "2011-01-01"}])
+        );
+        assert!(found.date_evidence.get("llm_not_applied").is_none());
+        assert!(found.date_evidence.get("llm_judgment").is_none());
+        let revision = &built.revisions[0];
+        assert_eq!(revision.status.as_deref(), Some("unresolved"));
+        assert_eq!(revision.reason, found.reason);
+        assert_eq!(built.llm.as_ref().unwrap()["usable_cross_checks"], 1);
+    }
+
+    #[test]
+    fn a_cross_check_agreement_only_adds_its_evidence() {
+        // The map separation: a cross-check entry gives no llm_not_applied and no llm_judgment
+        // evidence (design-v3.5-crosscheck.md 2), and the rest of the evidence stays.
+        let one = dated("700102", "20110101", "20110301");
+        let plain = without(std::slice::from_ref(&one));
+        let ledger = cross_ledger(&plain, &[(0, "2011-03-01", None, "cross-sentence")], None);
+        let built = plan(vec![one], &ledger);
+        let (found, before) = (built.occurrence(0), plain.occurrence(0));
+        assert_eq!(
+            (
+                found.status.as_str(),
+                found.enforcement_date.as_deref(),
+                found.reason.as_str()
+            ),
+            (
+                before.status.as_str(),
+                before.enforcement_date.as_deref(),
+                before.reason.as_str()
+            )
+        );
+        assert_eq!(cross(found)["result"], "agree");
+        assert_eq!(other_evidence(found), before.date_evidence);
+        assert_eq!(built.replay_body(0).unwrap(), plain.replay_body(0).unwrap());
+    }
+
+    #[test]
+    fn cross_checks_that_do_not_apply_change_nothing() {
+        // 4.3 chain-changed, 4.4 next-revision-changed and next-revision-definition, 4.5
+        // invalid-date: the parser result stays and only the evidence is added.
+        let one = dated("700103", "20110101", "20110301");
+        let same_day = dated("700104", "20110101", "20110301");
+        let later = dated("700105", "20110601", "20110701");
+        let cases: Vec<(Vec<SourceRevision>, Pick, Option<&str>, &str)> = vec![
+            (
+                vec![one.clone()],
+                (0, "2011-01-01", None, "cross-sentence"),
+                Some("other rule"),
+                "chain-changed",
+            ),
+            (
+                vec![one.clone(), later.clone()],
+                (0, "2011-01-01", None, "cross-sentence"),
+                None,
+                "next-revision-changed",
+            ),
+            (
+                vec![one.clone(), same_day],
+                (0, "2011-01-01", None, "cross-sentence"),
+                None,
+                "next-revision-definition",
+            ),
+            (
+                vec![one.clone()],
+                (0, "2011-02-30", None, "cross-sentence"),
+                None,
+                "invalid-date",
+            ),
+        ];
+        for (sources, pick, rule, reason) in cases {
+            let plain = without(&sources);
+            let ledger = cross_ledger(&plain, &[pick], rule);
+            let built = plan(sources, &ledger);
+            let (found, before) = (built.occurrence(0), plain.occurrence(0));
+            assert_eq!(cross(found)["result"], "not-applied", "{reason}");
+            assert_eq!(cross(found)["reason"], reason);
+            assert_eq!(
+                (found.status.as_str(), found.enforcement_date.as_deref()),
+                (before.status.as_str(), before.enforcement_date.as_deref()),
+                "{reason}"
+            );
+            assert_eq!(other_evidence(found), before.date_evidence, "{reason}");
+        }
+    }
+
+    #[test]
+    fn a_cross_check_of_an_undated_parser_result_does_not_apply() {
+        // 4.2: a revision that the parser left unresolved keeps its state.
+        let one = source(
+            "700106",
+            "20110101",
+            "99991231",
+            "일부개정",
+            "부칙\n이 조례는 공포 후 1개월이 경과한 날부터 시행한다.",
+        );
+        let mut plain = without(std::slice::from_ref(&one));
+        plain.revisions[0].occurrences[0].status = "unresolved".to_owned();
+        let ledger = cross_ledger(&plain, &[(0, "2011-01-01", None, "cross-sentence")], None);
+        plain.check_llm_cross(&ledger);
+        let found = plain.occurrence(0);
+        assert_eq!(found.status, "unresolved");
+        assert_eq!(cross(found)["reason"], "parser-not-dated");
+    }
+
+    #[test]
+    fn estimated_and_undated_disagreements_are_withdrawn() {
+        // An estimated parser date (cross-arrival) becomes unresolved; without a promulgation
+        // date the occurrence becomes undated and still passes the validation.
+        let one = dated("700107", "20110101", "20110301");
+        let mut estimated = without(std::slice::from_ref(&one));
+        estimated.revisions[0].occurrences[0].status = "estimated".to_owned();
+        let ledger = cross_ledger(
+            &estimated,
+            &[(0, "2011-01-01", None, "cross-arrival")],
+            None,
+        );
+        estimated.check_llm_cross(&ledger);
+        let found = estimated.occurrence(0);
+        assert_eq!(found.status, "unresolved");
+        assert_eq!(cross(found)["candidate_dates"][0]["status"], "estimated");
+        assert_eq!(found.date_evidence["arrival_estimate"], false);
+
+        let mut undated = without(std::slice::from_ref(&one));
+        undated.revisions[0].occurrences[0].promulgation_date = None;
+        let ledger = cross_ledger(&undated, &[(0, "2011-01-01", None, "cross-sentence")], None);
+        undated.check_llm_cross(&ledger);
+        undated.assign_ranks().unwrap();
+        let found = undated.occurrence(0);
+        assert_eq!(found.status, "undated");
+        assert_eq!(found.undated_semantics, ["공포일자", "시행일자"]);
+        assert_eq!(cross(found)["result"], "disagree");
+        undated.validate_occurrences().unwrap();
+    }
+
+    #[test]
+    fn one_disagreeing_copy_withdraws_every_dated_copy() {
+        // 4.6: the copies of one revision keep one state.
+        let one = dated("700108", "20110101", "20110301");
+        let mut other = one.clone();
+        other.xml.extend_from_slice(b"\n");
+        let sources = vec![one, other];
+        let plain = without(&sources);
+        assert_eq!(plain.occurrence(1).status, "confirmed");
+        let ledger = cross_ledger(&plain, &[(0, "2011-01-01", None, "cross-sentence")], None);
+        let built = plan(sources, &ledger);
+        let (first, second) = (built.occurrence(0), built.occurrence(1));
+        assert_eq!(
+            (first.status.as_str(), second.status.as_str()),
+            ("unresolved", "unresolved")
+        );
+        assert_eq!(cross(first)["result"], "disagree");
+        assert_eq!(cross(second)["result"], "copy-withheld");
+        assert_eq!(
+            cross(second)["disagree_copy_ids"],
+            json!([built.revisions[0].copy_id])
+        );
+        assert_eq!(second.date_evidence["date_withheld"], "llm-cross-check");
+    }
+
+    #[test]
+    fn a_cross_check_of_a_registry_revision_stops_the_build() {
+        let named = dated("1000238", "20071031", "20071201");
+        let plain = without(std::slice::from_ref(&named));
+        let ledger = cross_ledger(&plain, &[(0, "2007-10-31", None, "cross-sentence")], None);
+        assert!(DatePlan::new_with("ordinances", true, vec![named], Some(&ledger)).is_err());
+    }
+
+    #[test]
+    fn a_withdrawn_repeal_named_by_the_repeal_rule_is_reported() {
+        // design-v3.5-crosscheck.md 6: the earlier revision keeps the repeal evidence, and the
+        // manifest names the pair.
+        let earlier = dated("700109", "20240101", "20241231");
+        let repeal = source(
+            "700110",
+            "20240601",
+            "20240701",
+            "폐지",
+            "부칙\n이 조례는 2024년 7월 1일부터 시행한다.",
+        );
+        let sources = vec![earlier, repeal];
+        let plain = without(&sources);
+        assert_eq!(
+            plain.occurrence(0).date_evidence["date_withheld"],
+            "repeal-before-effective"
+        );
+        let ledger = cross_ledger(&plain, &[(1, "2024-06-01", None, "cross-sentence")], None);
+        let built = plan(sources, &ledger);
+        assert_eq!(built.occurrence(1).status, "unresolved");
+        assert_eq!(
+            other_evidence(built.occurrence(0)),
+            plain.occurrence(0).date_evidence
+        );
+        assert_eq!(
+            built.llm.as_ref().unwrap()["cross_check_repeal_refs"],
+            json!([{"revision": {"identity": "1", "revision": "700109"},
+                "repeal": {"identity": "1", "revision": "700110"}}])
+        );
+    }
+
+    #[test]
+    fn the_revision_commit_message_reads_only_its_arguments() {
+        let message = |status: &str, reason: &str| {
+            revision_commit_message(
+                "ordinances",
+                "조례",
+                "test",
+                "1",
+                "700111",
+                status,
+                reason,
+                "2011-03-01",
+            )
+        };
+        assert_eq!(
+            message("confirmed", "r"),
+            "조례: test\n\nrevision: 700111\nevent_date: 2011-03-01\nstatus: confirmed\nreason: r\n\n자치법규ID: 1\n자치법규일련번호: 700111\n\nEffective-Date: 2011-03-01"
+        );
+        assert_eq!(message("confirmed", "r"), message("confirmed", "r"));
+        assert_ne!(message("confirmed", "r"), message("confirmed", "s"));
+        assert!(message("llm", "r").starts_with("조례: test (LLM 판단)\n"));
+        assert!(message("estimated", "r").starts_with("조례: test (추정)\n"));
     }
 }
