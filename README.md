@@ -31,6 +31,8 @@ compiler/
 | 행정규칙 | [`admrules/README.md`](admrules/README.md) | [`admrules/assets/README.md`](admrules/assets/README.md) |
 | 자치법규 | [`ordinances/README.md`](ordinances/README.md) | [`ordinances/assets/README.md`](ordinances/assets/README.md) |
 
+시행일 기준 이력의 사례와 결정은 [시행일 예외 문서](docs/enforcement-date-exceptions.md)에 기록합니다.
+
 ## 빠른 시작
 
 ```bash
