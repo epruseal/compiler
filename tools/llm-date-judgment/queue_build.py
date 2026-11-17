@@ -7,8 +7,8 @@ Reads the source cache (header scan), the canonical ledgers and the protection l
 the runner lock; the canonical ledger changes only by rename, so a read sees one whole version.
 Takes its own lock queue/lock without waiting: when another queue build holds it, prints a skip
 line and exits 0. Writes, in this order: queue/new-<date>.jsonl (keys seen for the first time),
-queue/seen.jsonl, queue/pending.json (temporary file and rename). At start it drops a cut last line
-of seen and of every new file and adds to seen, with that file's first_seen, every key that a new
+queue/seen.jsonl, queue/pending.json (temporary file and rename). At start it drops the unreadable
+lines (a cut last line) of seen and of every new file and adds to seen, with that file's first_seen, every key that a new
 file of any day holds. One key (byte-equal copies) gives one target; the other paths go to
 other_paths. pending.json and the output line report stale_entries: ledger entries whose key the
 scan no longer finds. The collection service does not run this file (user decision Q4); run it by
@@ -82,15 +82,24 @@ def build(cache, ops, protected_path, manifests, day, rows=None):
     try:
         fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
     except OSError:
+        lock.close()
         print(json.dumps({'skipped': 'another queue build holds queue/lock'}))
         return 0
+    try:
+        return build_locked(cache, ops, protected_path, manifests, day, rows, qdir)
+    finally:
+        lock.close()
+
+
+def build_locked(cache, ops, protected_path, manifests, day, rows, qdir):
+    """The body of build; the caller holds queue/lock."""
     seen_path = qdir / 'seen.jsonl'
     new_path = qdir / f'new-{day}.jsonl'
-    seen = {tuple(x['key']): x['first_seen'] for x in ledger_mod.repair(seen_path)}
+    seen = {tuple(x['key']): x['first_seen'] for x in ledger_mod.repair(seen_path)[0]}
     # A build that stopped between its new file and seen leaves keys in a new file of any earlier
     # day; seen takes them with that file's first_seen, so no key appears in two new files.
     for path in sorted(qdir.glob('new-*.jsonl')):
-        for x in ledger_mod.repair(path):
+        for x in ledger_mod.repair(path)[0]:
             k = tuple(x['key'][f] for f in ledger_mod.KEY_FIELDS)
             if k not in seen:
                 ledger_mod.append_line(seen_path, {'key': list(k), 'first_seen': x['first_seen']})

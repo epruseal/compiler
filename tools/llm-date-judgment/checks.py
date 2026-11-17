@@ -8,8 +8,9 @@ compiler#1 heading rule). A judgment with a date is adoptable only when every re
   quote_in_field the basis quote is in the named source field
   date_valid     the date is a real calendar date and not 9999-12-31
   verb           the quote holds an enforcement verb in predicate form: 시행 or 施行 followed by a
-                 final or connective ending (한다, 합니다, 함, 된다, 됩니다, 됨, 하며, 하고, 하되,
-                 하나, 시킨다, sentence end) or 효력 발생 in the same forms. A final ending (one that
+                 final ending (한다, 합니다, 하였다, 했다, 하기로한다, 토록한다, 키로한다, 함, 된다,
+                 됩니다, 되었다, 됐다, 됨, 시킨다, 시킵니다, 시킴), a connective ending (하며, 하고,
+                 하되, 하나, 되며, 되고, 되되) or a sentence end, or 효력 발생 in the same forms. A final ending (one that
                  ends in 다, 함, 됨 or 킴) counts only when the next character of the field is a
                  sentence or clause mark (. 。 , ， ;), a closing mark (" ' ” ’ » ) ] 」 』) or the
                  field end. Every other follower (는, 고, 면, 던, 며, 지, 니, 에, 과 and so on) makes a

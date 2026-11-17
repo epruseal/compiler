@@ -6,6 +6,7 @@ literally (&lt; &gt; &amp;) is decoded once, the same way the compiler decodes i
 import hashlib
 import re
 import xml.etree.ElementTree as ET
+from pathlib import Path
 
 BODY_LIMIT = 30000
 ADDENDA_LIMIT = 60000
@@ -40,7 +41,7 @@ ORD_KINDS = {'C0001': '조례', 'C0002': '규칙', 'C0003': '훈령', 'C0004': '
 
 
 def read_source(path, dataset):
-    data = open(path, 'rb').read()
+    data = Path(path).read_bytes()
     root = ET.fromstring(data)
     meta = {'dataset': dataset, 'source_sha256': hashlib.sha256(data).hexdigest(), 'source_bytes': len(data)}
     fields = {}
@@ -148,6 +149,7 @@ def addenda_for_prompt(text, promulgation_raw, number):
         out = joined(kept)
     if len(out) > ADDENDA_LIMIT:
         a, b = sections[kept[0]]
-        head = lines[a]
-        out = '…\n' + head + '\n…\n' + '\n'.join(lines[a + 1:b])[-(ADDENDA_LIMIT - len(head)):]
+        head = lines[a][:ADDENDA_LIMIT // 2]
+        room = ADDENDA_LIMIT - len(head) - 5  # the two marks and three line breaks
+        out = '…\n' + head + '\n…\n' + '\n'.join(lines[a + 1:b])[-room:]
     return out, True

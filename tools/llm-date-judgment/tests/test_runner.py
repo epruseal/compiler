@@ -124,13 +124,13 @@ class RunnerTests(Env):
         self.assertEqual(self.run_judge(), 3)
         # The run of failures that stopped the run does not count against the target.
         fails = next((self.ops / 'failures').rglob('failures-admrules.json'))
-        self.assertEqual(json.loads(fails.read_text()), {'|'.join(('admrules', '2111925', ADM, ADM_SHA)): 0})
+        self.assertEqual(json.loads(fails.read_text())['counts'], {'|'.join(('admrules', '2111925', ADM, ADM_SHA)): 0})
         judge.STOP_AFTER_FAILURES = 5
         judge.TARGET_FAILURE_LIMIT = 1
         self.assertEqual(self.run_judge(), 0)
         os.environ['FAKE_MODE'] = 'ok'
         self.run_judge()
-        self.assertEqual(len(self.canonical()['entries']), 0)
+        self.assertEqual([e['kind'] for e in self.canonical()['entries']], ['failed'])
 
     def test_protected_revision_is_not_judged_and_gets_excluded_entry(self):
         self.write_protected([{'dataset': 'admrules', 'revision': ADM, 'identity': '2111925', 'copies': [{'path': 'x', 'source_sha256': ADM_SHA}],

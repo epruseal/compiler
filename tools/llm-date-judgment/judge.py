@@ -8,8 +8,9 @@ run refuses to start when ANTHROPIC_API_KEY is set, takes the operations lock, r
 effort or prompt that differs from the ledger policy unless --replace-policy is given, compacts the
 ledger, skips protected revisions and keys that hold a current-policy entry, restores an entry from a
 raw response only for a key without an entry, calls the CLI for the rest up to --max-calls, stops
-after 5 consecutive calls without a judgment (those 5 do not count against their targets), skips a
-target that failed 3 times, and compacts again at the end. See docs/llm-date-judgment.md.
+after 5 consecutive calls without a judgment (a first stop on a set of keys does not count against
+them; the same stop again counts), skips a target that failed 3 times and records it in the ledger as
+kind failed (no date; --retry-failed or a new policy tries it again), and compacts again at the end. See docs/llm-date-judgment.md.
 """
 import argparse
 import datetime
@@ -108,7 +109,18 @@ def one_line(judgment):
     return out
 
 
+class PaidKeyError(RuntimeError):
+    pass
+
+
+def refuse_paid_key():
+    """user-compiler2-shunt-path-20261116: no call runs with a paid API key in the environment."""
+    if 'ANTHROPIC_API_KEY' in os.environ:
+        raise PaidKeyError('ANTHROPIC_API_KEY is set; the judge does not use a paid API key')
+
+
 def call_cli(claude_bin, prompt, schema, model, effort, workdir, timeout):
+    refuse_paid_key()
     cmd = [claude_bin, '-p', '--model', model, '--tools', '', '--output-format', 'json', '--json-schema', schema,
            '--system-prompt', SYSTEM, '--no-session-persistence', '--setting-sources', 'project',
            '--strict-mcp-config', '--disable-slash-commands']
@@ -211,9 +223,10 @@ def failures_root(ops, policy):
 
 
 def run(args):
-    if 'ANTHROPIC_API_KEY' in os.environ:
-        # user-compiler2-shunt-path-20261116: the runner never uses a paid API key.
-        print('ANTHROPIC_API_KEY is set; the runner does not use a paid API key', file=sys.stderr)
+    try:
+        refuse_paid_key()
+    except PaidKeyError as error:
+        print(error, file=sys.stderr)
         return 2
     ops = Path(args.ops)
     ops.mkdir(parents=True, exist_ok=True)
@@ -221,8 +234,17 @@ def run(args):
     try:
         fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
     except OSError:
+        lock.close()
         print('another runner holds the operations lock', file=sys.stderr)
         return 75
+    try:
+        return run_locked(args, ops)
+    finally:
+        lock.close()
+
+
+def run_locked(args, ops):
+    """The body of run; the caller holds the operations lock."""
     ledger_mod.remove_temporary(ops / 'ledger', ops / 'ledger-history', ops / 'failures')
     template, schema, pversion = current_prompt()
     policy = {'model': args.model, 'effort': args.effort, 'prompt_version': pversion, 'runner_version': RUNNER_VERSION}
@@ -243,12 +265,20 @@ def run(args):
                     and not ledger_mod.policy_matches(current.get(tuple(t['key'][f] for f in ledger_mod.KEY_FIELDS), {}), policy))
         print(json.dumps({'replace_policy': {'from': held, 'to': policy, 'targets_to_judge': count, 'max_calls': args.max_calls}},
                          ensure_ascii=False))
-    ledger_mod.repair(led.journal)
+    journal_cut = ledger_mod.repair(led.journal)[1]
     led.protect(protected, revisions)
-    report = {'compaction_start': led.compact(policy, protected, list_sha, recheck_factory(args.cache))}
+    report = {'journal_cut_line_at_start': journal_cut,
+              'compaction_start': led.compact(policy, protected, list_sha, recheck_factory(args.cache))}
     entries = {ledger_mod.key_of(e): e for e in led.load()['entries']}
     failures_path = failures_root(ops, policy) / f'failures-{args.dataset}.json'
+    # counts: failures per target key; last_stop: the keys of the last run of failures that stopped a
+    # run; forgiven: those of them whose failure was taken back; errors: last error summary per key.
     failures = json.loads(failures_path.read_text(encoding='utf-8')) if failures_path.exists() else {}
+    failures = {'counts': failures.get('counts', {}), 'last_stop': failures.get('last_stop', []),
+                'forgiven': failures.get('forgiven', []), 'errors': failures.get('errors', {})}
+    if args.retry_failed:
+        failures = {'counts': {}, 'last_stop': [], 'forgiven': [], 'errors': {}}
+    counts = failures['counts']
     calls = restored = skipped_protected = skipped_done = 0
     skipped_failed_keys, skipped_source_changed_keys = [], []
     streak = []
@@ -272,8 +302,13 @@ def run(args):
         if k in entries and ledger_mod.policy_matches(entries[k], policy):
             skipped_done += 1
             continue
-        if failures.get(fkey, 0) >= TARGET_FAILURE_LIMIT:
+        if counts.get(fkey, 0) >= TARGET_FAILURE_LIMIT:
             skipped_failed_keys.append(fkey)
+            # lead-compiler2-a2-a3-20261117: the ledger records the skip; it carries no date.
+            old = entries.get(k)
+            if not (old and old.get('kind') == 'failed' and all(old.get(f) == policy[f] for f in JUDGE_POLICY_KEYS)
+                    and old.get('failures') == counts[fkey]):
+                led.add(failed_entry(key, policy, counts[fkey], failures['errors'].get(fkey)))
             continue
         source = Path(args.cache) / t['path']
         if not source.exists():
@@ -289,7 +324,8 @@ def run(args):
         if found is not None:
             d, call_args, judgment, info = found
             raw_ref = {'path': str(d.relative_to(ops)), 'stdout_sha256': ledger_mod.file_sha256(d / 'stdout.json')}
-            seen_target = dict(t, next_promulgation=call_args.get('next_promulgation'))
+            # The entry records the inputs of the call: next promulgation and parser result at call time.
+            seen_target = dict(t, next_promulgation=call_args.get('next_promulgation'), parser=call_args.get('parser', t.get('parser')))
             usage = dict(info.get('usage') or {}, seconds=call_args.get('seconds'), total_cost_usd=info.get('total_cost_usd'))
             led.add(build_entry(seen_target, meta, fields, judgment, policy, raw_ref, usage, call_args.get('body_excerpt'), call_args['judged_at']))
             restored += 1
@@ -313,20 +349,31 @@ def run(args):
         (d / 'stdout.json').write_text(stdout, encoding='utf-8')
         (d / 'stderr.txt').write_text(stderr, encoding='utf-8')
         call_args = dict(policy, key=key, exit=exit_code, seconds=seconds, judged_at=judged_at,
-                         next_promulgation=t.get('next_promulgation'), body_excerpt=excerpt)
+                         next_promulgation=t.get('next_promulgation'), parser=t.get('parser'), body_excerpt=excerpt)
         (d / 'call-args.json').write_text(json.dumps(call_args, ensure_ascii=False, indent=1), encoding='utf-8')
         judgment, info = response_of(stdout, exit_code)
         if judgment is None:
-            failures[fkey] = failures.get(fkey, 0) + 1
+            counts[fkey] = counts.get(fkey, 0) + 1
+            failures['errors'][fkey] = one_error(info)
             save_failures()
             streak.append(fkey)
             if len(streak) >= STOP_AFTER_FAILURES:
-                # A run of failures is a shared cause (usage limit, login); it does not count
-                # against the targets that met it.
-                for f in streak:
-                    failures[f] -= 1
+                # lead-compiler2-a2-a3-20261117: a first stop on a set of keys is taken as a shared
+                # cause (usage limit, login) and its failures are taken back. A stop on the same keys
+                # again counts, with the failures taken back before, so the third same stop reaches
+                # the target limit.
+                if sorted(streak) == sorted(failures['last_stop']):
+                    for f in failures['forgiven']:
+                        counts[f] += 1
+                    failures['forgiven'] = []
+                else:
+                    for f in streak:
+                        counts[f] -= 1
+                    failures['forgiven'] = list(streak)
+                failures['last_stop'] = list(streak)
                 save_failures()
                 stopped = f'{STOP_AFTER_FAILURES} consecutive calls without a judgment; last: {info}'
+                report['stop_keys'] = list(streak)
                 break
             continue
         streak = []
@@ -342,9 +389,24 @@ def run(args):
     return 3 if stopped and stopped != 'max-calls' else 0
 
 
+def one_error(info):
+    return json.dumps(info, ensure_ascii=False, sort_keys=True, default=str)[:300]
+
+
+def failed_entry(key, policy, failures, last_error):
+    """A target skipped after TARGET_FAILURE_LIMIT failures. It holds no date; the compiler keeps the
+    parser result or unresolved."""
+    return {'key': dict(key), 'kind': 'failed', 'reason': '지속 실패', 'failures': failures, 'last_error': last_error,
+            'model': policy['model'], 'effort': policy['effort'], 'prompt_version': policy['prompt_version'],
+            'runner_version': policy['runner_version'],
+            'judged_at': datetime.datetime.now(datetime.timezone.utc).strftime('%Y-%m-%dT%H:%M:%SZ')}
+
+
 def judge_file(dataset, source, model, effort, next_promulgation, out, claude_bin='claude', timeout=900):
     """Judges one source file for measurement: writes prompt.txt, stdout.json, stderr.txt and
-    entry.json into the new folder out. Writes no ledger."""
+    entry.json into the new folder out. Writes no ledger. Raises PaidKeyError when
+    ANTHROPIC_API_KEY is set."""
+    refuse_paid_key()
     out = Path(out)
     out.mkdir(parents=True, exist_ok=False)
     template, schema, pversion = current_prompt()
@@ -379,6 +441,11 @@ def judge_file(dataset, source, model, effort, next_promulgation, out, claude_bi
 
 
 def one(args):
+    try:
+        refuse_paid_key()
+    except PaidKeyError as error:
+        print(error, file=sys.stderr)
+        return 2
     template, schema, pversion = current_prompt()
     meta, fields = source_text.read_source(args.source, args.dataset)
     prompt, excerpt = render(template, meta, fields, args.next_promulgation)
@@ -412,6 +479,8 @@ def main(argv=None):
     r.add_argument('--targets', required=True)
     r.add_argument('--protected', required=True)
     r.add_argument('--max-calls', type=int, required=True)
+    r.add_argument('--retry-failed', action='store_true',
+                   help='forget the failure counts of this policy and call skipped targets again')
     r.add_argument('--replace-policy', action='store_true',
                    help='judge again under a model, effort or prompt that differs from the ledger policy')
     args = ap.parse_args(argv)

@@ -66,13 +66,24 @@ class FinalEndingFollower(unittest.TestCase):
         self.assertTrue(adoptable(J('explicit_date', '2012-01-01', '이 조례는 2012. 1. 1.부터 시행한다', field='제개정이유'),
                                   M('2011-12-01'), {'제개정이유': text}))
 
+    def test_causative_nominal_is_refused(self):
+        self.assertFalse(self.reason('이 조례는 2012. 1. 1.부터 시행시킴에 따라 종전 규칙을 폐지한다.'))
+        self.assertTrue(self.reason('이 조례는 2012. 1. 1.부터 시행시킴.'))
+
+    def test_lone_carriage_return_splits_lines(self):
+        text = '부칙 <2011.12.29>\r이 규칙은 2012년 1월 10일부터 시행한다.\r부칙 <2012.03.08>\r이 규칙은 공포한 날부터 시행한다.'
+        ok = adoptable(J('explicit_date', '2012-01-10', '이 규칙은 2012년 1월 10일부터 시행한다.', label='<2012.03.08>'), M('2012-03-08'), {'부칙': text})
+        self.assertFalse(ok)
+        ok = adoptable(J('explicit_date', '2012-01-10', '이 규칙은 2012년 1월 10일부터 시행한다.', label='<2011.12.29>'), M('2011-12-29'), {'부칙': text})
+        self.assertTrue(ok)
+
     def test_carriage_return_lines(self):
         text = '부칙\r\n제2조 중 “이 조례는\r\n2012. 1. 1.부터 시행한다”를 삭제한다.'
         self.assertFalse(adoptable(J('explicit_date', '2012-01-01', '2012. 1. 1.부터 시행한다'), M('2011-12-01'), {'부칙': text}))
 
 
 class SurvivingMutations(unittest.TestCase):
-    """Counterexamples of the review execution channel (verify/impl1-exec harness cx.py)."""
+    """Counterexamples of the review execution channel for the surviving mutations."""
 
     def test_quotation_tracking(self):
         cases = [
@@ -144,7 +155,7 @@ class LedgerFixes(Env):
         self.assertEqual(len(led.load()['entries']), 1)
         path = self.tmp / 'q.jsonl'
         path.write_bytes(b'{"a": 1}\n{"b": "\xea\xb3')
-        self.assertEqual(ledger.repair(path), [{'a': 1}])
+        self.assertEqual(ledger.repair(path), ([{'a': 1}], True))
         self.assertEqual(path.read_bytes(), b'{"a": 1}\n')
 
     def test_history_cut_line_is_repaired_before_append(self):
@@ -185,6 +196,26 @@ class LedgerFixes(Env):
         self.assertEqual([e['kind'] for e in led.load()['entries']], ['excluded'])
         self.assertEqual([h['kind'] for h in self.history()], ['judged'])
 
+    def test_same_second_judgment_with_new_content_replaces(self):
+        led = ledger.Ledger(self.ops, 'admrules')
+        led.add(self.entry('2026-01-01T00:00:00Z'))
+        led.compact(POLICY, {}, None)
+        led.add(dict(self.entry('2026-01-01T00:00:00Z'), date='2009-07-01'))
+        led.compact(POLICY, {}, None)
+        self.assertEqual(led.load()['entries'][0]['date'], '2009-07-01')
+        self.assertEqual([h['date'] for h in self.history()], ['2009-06-27'])
+        led.add(dict(self.entry('2026-01-01T00:00:00Z'), date='2009-07-01'))
+        led.compact(POLICY, {}, None)
+        self.assertEqual(len(self.history()), 1)
+
+    def test_two_rechecks_keep_both_in_history(self):
+        led = ledger.Ledger(self.ops, 'admrules')
+        led.add(self.entry('t1', runner='r0'))
+        led.compact(dict(POLICY, runner_version='r0'), {}, None)
+        led.compact(POLICY, {}, None, lambda e: dict(e, runner_version='r1'))
+        led.compact(dict(POLICY, runner_version='r2'), {}, None, lambda e: dict(e, runner_version='r2'))
+        self.assertEqual([h['runner_version'] for h in self.history()], ['r0', 'r1'])
+
     def test_unsorted_or_duplicate_canonical_is_refused(self):
         path = self.ops / 'ledger' / 'admrules.json'
         path.parent.mkdir(parents=True)
@@ -201,7 +232,8 @@ class LedgerFixes(Env):
         led.compact(POLICY, {}, None)
         first = led.path.read_bytes()
         self.assertEqual(first.decode('utf-8'), ledger.dumps(json.loads(first)))
-        self.assertLess(first.index(b'"dataset"'), first.index(b'"entries"'))
+        order = [first.index(f'"{k}"'.encode()) for k in ('dataset', 'entries', 'policy', 'protected_list_sha256', 'schema_version')]
+        self.assertEqual(order, sorted(order))
         led.compact(POLICY, {}, None)
         self.assertEqual(led.path.read_bytes(), first)
 
@@ -313,6 +345,60 @@ class RunnerFixes(Env):
         self.assertEqual([r['calls'] for r in runs], [1, 1, 1, 0])
         self.assertEqual(runs[-1]['skipped_failed_keys'], [FKEY])
 
+    def test_same_stop_three_times_skips_and_records_failed(self):
+        """lead-compiler2-a2-a3-20261117: five targets that always fail stop every run; the first stop
+        is forgiven, the same stop again counts, and after the third same stop the targets are skipped,
+        recorded as failed and the run reaches the next target."""
+        bad = self.copies(5)
+        good = self.target()
+        self.set_targets(bad + [good])
+        os.environ.update({'FAKE_MODE': 'seq', 'FAKE_SEQ': 'exit1', 'FAKE_COUNTER': str(self.tmp / 'n')})
+        stops = []
+        for _ in range(3):
+            code, lines = self.run_report()
+            stops.append((code, lines[-1]['calls'], sorted(lines[-1]['stop_keys'])))
+        bad_keys = sorted('|'.join(t['key'][f] for f in ledger.KEY_FIELDS) for t in bad)
+        self.assertEqual(stops, [(3, 5, bad_keys)] * 3)
+        fails = json.loads(next((self.ops / 'failures').rglob('failures-admrules.json')).read_text())
+        self.assertEqual(sorted(fails['counts'].values()), [3] * 5)
+        os.environ['FAKE_MODE'] = 'ok'
+        code, lines = self.run_report()
+        self.assertEqual((code, lines[-1]['calls'], lines[-1]['skipped_failed']), (0, 1, 5))
+        self.assertEqual(sorted(lines[-1]['skipped_failed_keys']), bad_keys)
+        kinds = sorted(e['kind'] for e in self.canonical()['entries'])
+        self.assertEqual(kinds, ['failed'] * 5 + ['judged'])
+        failed = [e for e in self.canonical()['entries'] if e['kind'] == 'failed'][0]
+        self.assertEqual((failed['reason'], failed['failures']), ('지속 실패', 3))
+        self.assertIn('Prompt is too long', failed['last_error'])
+        self.assertNotIn('date', failed)
+        before = len(ledger.read_lines(self.ops / 'ledger-history' / 'admrules.jsonl')[0])
+        self.run_report()
+        self.assertEqual(len(ledger.read_lines(self.ops / 'ledger-history' / 'admrules.jsonl')[0]), before)
+        code, lines = self.run_report('--retry-failed')
+        self.assertEqual(lines[-1]['calls'], 5)
+        self.assertEqual(sorted(e['kind'] for e in self.canonical()['entries']), ['judged'] * 6)
+
+    def test_a_different_stop_is_forgiven(self):
+        first, second = self.copies(5), self.copies(10)[5:]
+        os.environ['FAKE_MODE'] = 'exit1'
+        self.set_targets(first)
+        self.run_report()
+        self.set_targets(second)
+        self.run_report()
+        fails = json.loads(next((self.ops / 'failures').rglob('failures-admrules.json')).read_text())
+        self.assertEqual(set(fails['counts'].values()), {0})
+
+    def test_new_policy_tries_failed_targets_again(self):
+        judge.TARGET_FAILURE_LIMIT = 1
+        os.environ['FAKE_MODE'] = 'exit1'
+        self.run_report()
+        os.environ['FAKE_MODE'] = 'ok'
+        code, lines = self.run_report()
+        self.assertEqual(lines[-1]['skipped_failed'], 1)
+        code, lines = self.run_report('--replace-policy', model='m2')
+        self.assertEqual(lines[-1]['calls'], 1)
+        self.assertEqual(self.canonical()['entries'][0]['kind'], 'judged')
+
     def test_success_resets_the_run_of_failures(self):
         judge.STOP_AFTER_FAILURES = 2
         self.set_targets(self.copies(3))
@@ -391,6 +477,59 @@ class RunnerFixes(Env):
         code, lines = self.run_report()
         self.assertEqual(code, 2)
         self.assertFalse(self.ops.exists())
+        source = str(self.cache / 'admrule' / f'{ADM}.xml')
+        code = judge.main(['one', '--dataset', 'admrules', '--model', 'm1', '--claude', str(self.fake), '--source', source,
+                           '--workdir', str(self.tmp)])
+        self.assertEqual(code, 2)
+        with self.assertRaises(judge.PaidKeyError):
+            judge.judge_file('admrules', source, 'm1', 'default', None, self.tmp / 'one', claude_bin=str(self.fake))
+        self.assertFalse((self.tmp / 'one').exists())
+        with self.assertRaises(judge.PaidKeyError):
+            judge.call_cli(str(self.fake), '', '{}', 'm1', 'default', self.tmp, 10)
+
+    def test_cut_journal_is_reported_and_kept_entries_survive(self):
+        self.write_protected([{'dataset': 'admrules', 'revision': ADM, 'identity': '2111925', 'copies': [{'path': 'x', 'source_sha256': ADM_SHA}],
+                               'decision_id': 'd', 'source': 's', 'expected': {}}])
+        journal = self.ops / 'ledger' / 'admrules.journal.jsonl'
+        journal.parent.mkdir(parents=True)
+        journal.write_bytes('{"key": {"dataset": "admrules"}, "reason": "'.encode() + b'\xea\xb3')
+        code, lines = self.run_report()
+        self.assertTrue(lines[-1]['journal_cut_line_at_start'])
+        self.assertEqual([e['kind'] for e in self.canonical()['entries']], ['excluded'])
+        code, lines = self.run_report()
+        self.assertFalse(lines[-1]['journal_cut_line_at_start'])
+
+    def test_source_change_and_missing_source_are_both_listed(self):
+        changed = self.cache / 'admrule' / 'changed.xml'
+        changed.write_bytes((self.cache / 'admrule' / f'{ADM}.xml').read_bytes() + b'\n')
+        self.set_targets([dict(self.target(), path='admrule/missing.xml'), dict(self.target(), path='admrule/changed.xml')])
+        code, lines = self.run_report()
+        self.assertEqual((lines[-1]['skipped_source_changed'], lines[-1]['skipped_source_changed_keys']), (2, [FKEY, FKEY]))
+        self.assertEqual(lines[-1]['calls'], 0)
+
+    def test_replace_policy_counts_exactly_the_keys_to_judge(self):
+        done, fresh = self.copies(2)
+        protected_key = dict(KEY, revision='2200000000001')
+        other = dict(self.target(), key=dict(KEY, dataset='ordinances'))
+        self.write_protected([{'dataset': 'admrules', 'revision': '2200000000001', 'identity': '2111925',
+                               'copies': [{'path': 'x', 'source_sha256': ADM_SHA}], 'decision_id': 'd', 'source': 's', 'expected': {}}])
+        self.set_targets([done])
+        self.run_report()
+        self.set_targets([done, fresh, dict(self.target(), key=protected_key), other])
+        code, lines = self.run_report('--replace-policy', model='m2', max_calls=0)
+        self.assertEqual(lines[0]['replace_policy']['targets_to_judge'], 2)
+        code, lines = self.run_report('--replace-policy', model='m2', max_calls=1)
+        code, lines = self.run_report(model='m2', max_calls=0)
+        self.assertEqual(code, 0)
+
+    def test_restored_entry_keeps_call_time_parser(self):
+        self.run_report()
+        shutil.rmtree(self.ops / 'ledger')
+        self.set_targets([self.target(parser={'category': 'judge'})])
+        self.run_report(max_calls=0)
+        e = self.canonical()['entries'][0]
+        self.assertEqual(e['parser_at_judgment']['category'], 'cross-arrival')
+        self.assertEqual(e['cross_check_at_judgment'], 'disagree')
 
     def test_gateway_environment_is_passed_on(self):
         """user-compiler2-shunt-path-20261116: the runner keeps ANTHROPIC_BASE_URL for the CLI."""
@@ -477,6 +616,28 @@ class QueueFixes(Env):
         out = self.build('20261117', [self.rows(sha=None, eff_class='valid')])
         self.assertEqual((out['user_confirmation'], out['targets']), (0, 0))
 
+    def test_protected_valid_copy_is_not_stale(self):
+        self.write_protected([{'dataset': 'admrules', 'revision': ADM, 'identity': '2111925', 'copies': [{'path': 'x', 'source_sha256': ADM_SHA}],
+                               'decision_id': 'd', 'source': 's', 'expected': {}}])
+        led = ledger.Ledger(self.ops, 'admrules')
+        protected, revisions, _ = ledger.load_protected(self.protected)
+        led.protect(protected, revisions)
+        led.compact(POLICY, protected, None)
+        out = self.build('20261117', [self.rows(sha=None, eff_class='valid')])
+        self.assertEqual(out['stale_entries'], {'ordinances': 0, 'admrules': 0})
+
+    def test_same_day_rerun_leaves_no_cut_line(self):
+        copy = self.cache / 'admrule' / 'other.xml'
+        copy.write_bytes((self.cache / 'admrule' / f'{ADM}.xml').read_bytes() + b'\n')
+        other = dict(self.rows(path=copy), sha256=ledger.file_sha256(copy), serial='2200000000002')
+        self.build('20261117', [self.rows()])
+        with open(self.ops / 'queue' / 'new-20261117.jsonl', 'ab') as fh:
+            fh.write(b'{"key": {"dataset": "adm')
+        self.build('20261117', [self.rows(), other])
+        lines, cut = ledger.read_lines(self.ops / 'queue' / 'new-20261117.jsonl')
+        self.assertFalse(cut)
+        self.assertEqual(len(lines), 2)
+
     def test_byte_equal_copies_give_one_target(self):
         copy = self.cache / 'admrule' / 'history-copy.xml'
         shutil.copy(self.cache / 'admrule' / f'{ADM}.xml', copy)
@@ -492,6 +653,8 @@ class QueueFixes(Env):
         led.compact(POLICY, {}, None)
         out = self.build('20261117', [self.rows()])
         self.assertEqual(out['stale_entries'], {'ordinances': 0, 'admrules': 1})
+        pending = json.loads((self.ops / 'queue' / 'pending.json').read_text())
+        self.assertEqual(pending['stale_entries'], {'ordinances': 0, 'admrules': 1})
 
     def test_manifest_sha256_in_parser_record(self):
         manifest = self.tmp / 'm.json'
@@ -521,6 +684,14 @@ class AddendaExcerpt(unittest.TestCase):
             out, _ = source_text.addenda_for_prompt(long_one, '20090101', '')
             self.assertIn('부칙 <2009. 1. 1.>', out)
             self.assertTrue(out.endswith('시행한다.'))
+            self.assertLessEqual(len(out), 200)
+            long_head = '부칙 ' + '다' * 400 + '\n본문'
+            out, _ = source_text.addenda_for_prompt(long_head, '20090101', '')
+            self.assertLessEqual(len(out), 200)
+            self.assertTrue(out.endswith('본문'))
+            sections = '부칙 <2001>\r' + '가' * 250 + '\r부칙 <2002>\r이 조례는 시행한다.'
+            out, _ = source_text.addenda_for_prompt(sections, '20020101', '')
+            self.assertTrue(out.startswith('…\n부칙 <2002>'), out[:30])
         finally:
             source_text.ADDENDA_LIMIT = saved
 

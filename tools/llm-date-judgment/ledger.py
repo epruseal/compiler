@@ -6,7 +6,8 @@ Layout under an operations folder:
   ledger-history/<dataset>.jsonl replaced entries, one line each
 
 The canonical file is {"schema_version": 1, "dataset", "policy", "protected_list_sha256",
-"entries": [...]}. Entries are sorted by key and a key appears once. Serialization sorts object
+"entries": [...]}. An entry is judged, excluded (protected revision) or failed (skipped after repeated
+failures; no date). Entries are sorted by key and a key appears once. Serialization sorts object
 keys, uses UTF-8 and ends with one newline, so equal content gives equal bytes.
 """
 import hashlib
@@ -96,11 +97,11 @@ def read_lines(path):
 
 def repair(path):
     """Rewrites an append-only file without its unreadable lines, so that a later append does not
-    join a cut line. Returns the complete lines."""
+    join a cut line. Returns (complete lines, whether a line was dropped)."""
     lines, cut = read_lines(path)
     if cut:
         atomic_write(path, ''.join(json.dumps(x, ensure_ascii=False, sort_keys=True) + '\n' for x in lines))
-    return lines
+    return lines, cut
 
 
 def remove_temporary(*folders):
@@ -174,7 +175,7 @@ class Ledger:
                 if fixed is not None and fixed != e:
                     replaced.append(e)
                     current[k] = fixed
-        seen_history = {mark_of(h) for h in repair(self.history)}
+        seen_history = {mark_of(h) for h in repair(self.history)[0]}
         for old in replaced:
             mark = mark_of(old)
             if mark not in seen_history:
@@ -225,8 +226,8 @@ def validate(doc, dataset):
         raise LedgerError('policy must hold exactly ' + ', '.join(POLICY_KEYS))
     keys = []
     for e in doc['entries']:
-        if e.get('kind') not in ('judged', 'excluded'):
-            raise LedgerError('entry kind must be judged or excluded')
+        if e.get('kind') not in ('judged', 'excluded', 'failed'):
+            raise LedgerError('entry kind must be judged, excluded or failed')
         if set(e['key']) != set(KEY_FIELDS) or e['key']['dataset'] != dataset:
             raise LedgerError('entry key fields or dataset mismatch')
         keys.append(key_of(e))
