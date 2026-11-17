@@ -8,8 +8,8 @@ run refuses to start when ANTHROPIC_API_KEY is set, takes the operations lock, r
 effort or prompt that differs from the ledger policy unless --replace-policy is given, compacts the
 ledger, skips protected revisions and keys that hold a current-policy entry, restores an entry from a
 raw response only for a key without an entry, calls the CLI for the rest up to --max-calls, stops
-after 5 consecutive calls without a judgment (a first stop on a set of keys does not count against
-them; the same stop again counts), skips a target that failed 3 times and records it in the ledger as
+after 5 consecutive calls without a judgment (a stop on keys other than those of the previous stop
+does not count against them; a stop on the keys of the previous stop counts), skips a target that failed 3 times and records it in the ledger as
 kind failed (no date; --retry-failed or a new policy tries it again), and compacts again at the end. See docs/llm-date-judgment.md.
 """
 import argparse
@@ -276,8 +276,6 @@ def run_locked(args, ops):
     failures = json.loads(failures_path.read_text(encoding='utf-8')) if failures_path.exists() else {}
     failures = {'counts': failures.get('counts', {}), 'last_stop': failures.get('last_stop', []),
                 'forgiven': failures.get('forgiven', []), 'errors': failures.get('errors', {})}
-    if args.retry_failed:
-        failures = {'counts': {}, 'last_stop': [], 'forgiven': [], 'errors': {}}
     counts = failures['counts']
     calls = restored = skipped_protected = skipped_done = 0
     skipped_failed_keys, skipped_source_changed_keys = [], []
@@ -289,6 +287,12 @@ def run_locked(args, ops):
 
     def save_failures():
         ledger_mod.atomic_write(failures_path, json.dumps(failures, ensure_ascii=False, indent=1, sort_keys=True) + '\n')
+
+    if args.retry_failed:
+        # The reset is written at once, so it does not depend on what the calls of this run do.
+        failures = {'counts': {}, 'last_stop': [], 'forgiven': [], 'errors': {}}
+        counts = failures['counts']
+        save_failures()
 
     for t in targets:
         key = t['key']
@@ -305,10 +309,11 @@ def run_locked(args, ops):
         if counts.get(fkey, 0) >= TARGET_FAILURE_LIMIT:
             skipped_failed_keys.append(fkey)
             # lead-compiler2-a2-a3-20261117: the ledger records the skip; it carries no date.
+            new = failed_entry(key, policy, counts[fkey], failures['errors'].get(fkey))
             old = entries.get(k)
-            if not (old and old.get('kind') == 'failed' and all(old.get(f) == policy[f] for f in JUDGE_POLICY_KEYS)
-                    and old.get('failures') == counts[fkey]):
-                led.add(failed_entry(key, policy, counts[fkey], failures['errors'].get(fkey)))
+            # Written again only when something but the time differs (a new error after a retry).
+            if old is None or {f: v for f, v in old.items() if f != 'judged_at'} != {f: v for f, v in new.items() if f != 'judged_at'}:
+                led.add(new)
             continue
         source = Path(args.cache) / t['path']
         if not source.exists():
@@ -358,10 +363,10 @@ def run_locked(args, ops):
             save_failures()
             streak.append(fkey)
             if len(streak) >= STOP_AFTER_FAILURES:
-                # lead-compiler2-a2-a3-20261117: a first stop on a set of keys is taken as a shared
-                # cause (usage limit, login) and its failures are taken back. A stop on the same keys
-                # again counts, with the failures taken back before, so the third same stop reaches
-                # the target limit.
+                # lead-compiler2-a2-a3-20261117: a stop on keys other than those of the previous stop
+                # is taken as a shared cause (usage limit, login) and its failures are taken back. A
+                # stop on the keys of the previous stop counts, with the failures taken back before,
+                # so the third same stop reaches the target limit.
                 if sorted(streak) == sorted(failures['last_stop']):
                     for f in failures['forgiven']:
                         counts[f] += 1

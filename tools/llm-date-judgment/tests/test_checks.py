@@ -157,7 +157,7 @@ class FollowupForms(unittest.TestCase):
 
 
 class PredicateAndQuotes(unittest.TestCase):
-    """Counterexamples of the v2.2 B re-check (verify/design-v22-B-retry blocking 1)."""
+    """Counterexamples of the design re-check: attributive and nominal verb forms."""
 
     def test_attributive_verb_after_date_is_not_a_clause(self):
         text = '부칙\n제1조(시행일) 이 규칙은 공포한 날부터 시행한다.\n제2조(적용례) 이 규칙은 2012년 1월 1일부터 시행되는 임용시험부터 적용한다.'

@@ -378,6 +378,75 @@ class RunnerFixes(Env):
         self.assertEqual(lines[-1]['calls'], 5)
         self.assertEqual(sorted(e['kind'] for e in self.canonical()['entries']), ['judged'] * 6)
 
+    def fail_four_runs(self):
+        """Five targets that always fail and one good target: three same stops and one skip run."""
+        bad = self.copies(5)
+        self.set_targets(bad + [self.target()])
+        os.environ['FAKE_MODE'] = 'exit1'
+        for _ in range(4):
+            self.run_report()
+        return sorted('|'.join(t['key'][f] for f in ledger.KEY_FIELDS) for t in bad)
+
+    def failure_file(self):
+        return json.loads(next((self.ops / 'failures').rglob('failures-admrules.json')).read_text())
+
+    def test_failed_entries_are_not_written_again_when_only_the_time_differs(self):
+        """Counterexample N05 of the third review, without a clock: the fifth run gives a new time only."""
+        self.fail_four_runs()
+        before = len(ledger.read_lines(self.ops / 'ledger-history' / 'admrules.jsonl')[0])
+        original = judge.failed_entry
+        judge.failed_entry = lambda *a: dict(original(*a), judged_at='2099-01-01T00:00:00Z')
+        try:
+            self.run_report()
+        finally:
+            judge.failed_entry = original
+        self.assertEqual(len(ledger.read_lines(self.ops / 'ledger-history' / 'admrules.jsonl')[0]), before)
+        self.assertNotIn('2099-01-01T00:00:00Z', {e['judged_at'] for e in self.canonical()['entries']})
+
+    def test_retry_empties_the_whole_failure_record(self):
+        """Counterexample Y06 of the third review: a retry while the five targets still fail."""
+        bad_keys = self.fail_four_runs()
+        code, lines = self.run_report('--retry-failed')
+        self.assertEqual((code, lines[-1]['calls']), (3, 5))
+        fails = self.failure_file()
+        self.assertEqual(fails['counts'], {k: 0 for k in bad_keys})
+        self.assertEqual((sorted(fails['last_stop']), sorted(fails['forgiven'])), (bad_keys, bad_keys))
+
+    def test_retry_reset_is_written_even_when_no_call_fails(self):
+        """Third review blocking 1 (scenario a2 A): the retry calls succeed and stop at --max-calls."""
+        bad_keys = self.fail_four_runs()
+        os.environ['FAKE_MODE'] = 'ok'
+        code, lines = self.run_report('--retry-failed', max_calls=2)
+        self.assertEqual((lines[-1]['calls'], lines[-1]['stopped']), (2, 'max-calls'))
+        self.assertEqual(self.failure_file()['counts'], {})
+        code, lines = self.run_report()
+        # The three targets the retry did not reach and the good target, which also failed in the fourth run.
+        self.assertEqual((lines[-1]['calls'], lines[-1]['skipped_failed']), (4, 0))
+
+    def test_failed_entry_takes_the_error_of_the_new_cycle(self):
+        """Third review blocking 2: after a retry the targets fail with another error."""
+        self.fail_four_runs()
+        failed = [e for e in self.canonical()['entries'] if e['kind'] == 'failed']
+        self.assertTrue(all('Prompt is too long' in e['last_error'] for e in failed))
+        self.run_report('--retry-failed')
+        os.environ['FAKE_MODE'] = 'error'
+        for _ in range(3):
+            self.run_report()
+        failed = [e for e in self.canonical()['entries'] if e['kind'] == 'failed']
+        self.assertEqual(len(failed), 5)
+        self.assertTrue(all('usage limit' in e['last_error'] for e in failed), [e['last_error'] for e in failed])
+
+    def test_replace_policy_count_skips_keys_of_the_run_policy(self):
+        """Counterexample X15: m1, then m2 on another key, then back to m1 counts only the m2 key."""
+        c = self.copies(2)
+        self.set_targets([c[0]])
+        self.run_report(model='m1')
+        self.set_targets([c[1]])
+        self.run_report('--replace-policy', model='m2')
+        self.set_targets(c)
+        code, lines = self.run_report('--replace-policy', model='m1', max_calls=0)
+        self.assertEqual(lines[0]['replace_policy']['targets_to_judge'], 1)
+
     def test_a_different_stop_is_forgiven(self):
         first, second = self.copies(5), self.copies(10)[5:]
         os.environ['FAKE_MODE'] = 'exit1'
@@ -448,7 +517,7 @@ class RunnerFixes(Env):
         self.assertEqual(e['usage']['total_cost_usd'], 0.01)
 
     def test_old_runner_entry_that_fails_recheck_is_judged_again(self):
-        """fix1-design-1 blocking 2: an entry of an old runner whose recheck cannot read its source path
+        """Review of the restore rule: an entry of an old runner whose recheck cannot read its source path
         is judged again, not restored from its own raw response."""
         self.run_report()
         judge.RUNNER_VERSION = 'r9'
@@ -623,6 +692,19 @@ class QueueFixes(Env):
         protected, revisions, _ = ledger.load_protected(self.protected)
         led.protect(protected, revisions)
         led.compact(POLICY, protected, None)
+        out = self.build('20261117', [self.rows(sha=None, eff_class='valid')])
+        self.assertEqual(out['stale_entries'], {'ordinances': 0, 'admrules': 0})
+
+    def test_entry_of_a_revision_that_left_the_list_is_not_stale(self):
+        """Counterexample X21: the revision left the protection list, keeps its excluded entry, and its scan
+        row has a valid XML date and so no scan SHA-256."""
+        self.write_protected([{'dataset': 'admrules', 'revision': ADM, 'identity': '2111925', 'copies': [{'path': 'x', 'source_sha256': ADM_SHA}],
+                               'decision_id': 'd', 'source': 's', 'expected': {}}])
+        led = ledger.Ledger(self.ops, 'admrules')
+        protected, revisions, _ = ledger.load_protected(self.protected)
+        led.protect(protected, revisions)
+        led.compact(POLICY, protected, None)
+        self.write_protected([])
         out = self.build('20261117', [self.rows(sha=None, eff_class='valid')])
         self.assertEqual(out['stale_entries'], {'ordinances': 0, 'admrules': 0})
 

@@ -105,6 +105,7 @@ def run(models, index_path, out, cap, spec=None):
             if calls_so_far() + 1 > cap:
                 print(f'cap {cap} reached; stop before {model} {case["revision"]}', flush=True)
                 return 3
+            judge.refuse_paid_key()  # before the call log, so a refused call is not counted
             with CALL_LOG.open('a', encoding='utf-8') as fh:
                 fh.write(f'gold {model} {case["dataset"]} {case["revision"]}\n')
             entry = judge.judge_file(case['dataset'], item['path'], model, 'default', item['next_promulgation'], target)
