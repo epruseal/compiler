@@ -20880,6 +20880,78 @@ mod llm_tests {
     }
 
     #[test]
+    fn a_cross_check_of_a_gate_withheld_revision_does_not_apply() {
+        // 4.2 after the gate: an added detection sentence in the body takes the parser date away
+        // before the cross-check, so the cross-check does not apply.
+        // The c08 form: the control without the added sentence is dated from its addendum.
+        let control = source(
+            "700113",
+            "20110101",
+            "99991231",
+            "제정",
+            "이 조례는 2011년 3월 1일부터 시행한다.",
+        );
+        assert_eq!(
+            without(std::slice::from_ref(&control)).occurrence(0).status,
+            "confirmed"
+        );
+        let mut held = control.clone();
+        held.xml = String::from_utf8(held.xml)
+            .unwrap()
+            .replace(
+                "제1조(목적) 이 조례는 운영을 정한다.",
+                "제2조 이 조례(제1234호)는 2025년 1월 1일 시행합니다.",
+            )
+            .into_bytes();
+        let plain = without(std::slice::from_ref(&held));
+        let before = plain.occurrence(0);
+        assert_eq!(
+            (
+                before.status.as_str(),
+                before.date_evidence["date_withheld"].as_str()
+            ),
+            ("unresolved", Some("added-detection-sentence"))
+        );
+        let ledger = cross_ledger(&plain, &[(0, "2011-01-01", None, "cross-sentence")], None);
+        let built = plan(vec![held], &ledger);
+        let found = built.occurrence(0);
+        assert_eq!(
+            (
+                found.status.as_str(),
+                found.exposure_date.as_deref(),
+                found.reason.as_str()
+            ),
+            (
+                before.status.as_str(),
+                before.exposure_date.as_deref(),
+                before.reason.as_str()
+            )
+        );
+        assert_eq!(cross(found)["reason"], "parser-not-dated");
+        assert_eq!(other_evidence(found), before.date_evidence);
+    }
+
+    #[test]
+    fn a_disagreement_without_a_promulgation_date_leaves_the_revision_undated() {
+        // 5: without a promulgation date the withdrawn occurrence becomes undated, through the
+        // whole assembly.
+        let one = dated("700114", "", "20110301");
+        let plain = without(std::slice::from_ref(&one));
+        let before = plain.occurrence(0);
+        assert_eq!(
+            (before.status.as_str(), before.promulgation_date.as_deref()),
+            ("confirmed", None)
+        );
+        let ledger = cross_ledger(&plain, &[(0, "2011-01-01", None, "cross-sentence")], None);
+        let built = plan(vec![one], &ledger);
+        let found = built.occurrence(0);
+        assert_eq!(found.status, "undated");
+        assert_eq!(found.undated_semantics, ["공포일자", "시행일자"]);
+        assert_eq!(cross(found)["result"], "disagree");
+        assert_eq!(found.date_evidence["date_withheld"], "llm-cross-check");
+    }
+
+    #[test]
     fn estimated_and_undated_disagreements_are_withdrawn() {
         // An estimated parser date (cross-arrival) becomes unresolved; without a promulgation
         // date the occurrence becomes undated and still passes the validation.
