@@ -22,6 +22,10 @@ POLICY = {'model': 'm1', 'effort': 'default', 'prompt_version': 'p', 'runner_ver
 FKEY = '|'.join(('admrules', '2111925', ADM, ADM_SHA))
 
 
+def FKEY_OF(target):
+    return '|'.join(target['key'][f] for f in ledger.KEY_FIELDS)
+
+
 def J(outcome, date, quote, field='부칙', label=''):
     return {'outcome': outcome, 'date': date, 'basis_quote': quote, 'basis_field': field, 'section_label': label,
             'proviso': False, 'proviso_quote': '', 'partial_enforcement': [], 'attribution': '', 'rules_applied': [], 'reason': ''}
@@ -265,8 +269,10 @@ class LedgerFixes(Env):
 
 SEQ_FAKE = '''#!/usr/bin/env python3
 import json, os, sys
-sys.stdin.read()
+prompt = sys.stdin.read()
 mode = os.environ.get('FAKE_MODE', 'ok')
+if os.environ.get('FAKE_BAD_FAIL') and 'BADTARGET' in prompt:
+    mode = 'exit1'
 if mode == 'seq':
     counter = os.environ['FAKE_COUNTER']
     n = int(open(counter).read()) if os.path.exists(counter) else 0
@@ -391,7 +397,7 @@ class RunnerFixes(Env):
         return json.loads(next((self.ops / 'failures').rglob('failures-admrules.json')).read_text())
 
     def test_failed_entries_are_not_written_again_when_only_the_time_differs(self):
-        """Counterexample N05 of the third review, without a clock: the fifth run gives a new time only."""
+        """A run after the skip run gives the failed entries a new time only; they are not written again."""
         self.fail_four_runs()
         before = len(ledger.read_lines(self.ops / 'ledger-history' / 'admrules.jsonl')[0])
         original = judge.failed_entry
@@ -404,7 +410,7 @@ class RunnerFixes(Env):
         self.assertNotIn('2099-01-01T00:00:00Z', {e['judged_at'] for e in self.canonical()['entries']})
 
     def test_retry_empties_the_whole_failure_record(self):
-        """Counterexample Y06 of the third review: a retry while the five targets still fail."""
+        """A retry while the five targets still fail: the record holds only what the retry run did."""
         bad_keys = self.fail_four_runs()
         code, lines = self.run_report('--retry-failed')
         self.assertEqual((code, lines[-1]['calls']), (3, 5))
@@ -413,18 +419,18 @@ class RunnerFixes(Env):
         self.assertEqual((sorted(fails['last_stop']), sorted(fails['forgiven'])), (bad_keys, bad_keys))
 
     def test_retry_reset_is_written_even_when_no_call_fails(self):
-        """Third review blocking 1 (scenario a2 A): the retry calls succeed and stop at --max-calls."""
+        """The retry calls succeed and the run stops at --max-calls: the emptied record is on disk."""
         bad_keys = self.fail_four_runs()
         os.environ['FAKE_MODE'] = 'ok'
         code, lines = self.run_report('--retry-failed', max_calls=2)
         self.assertEqual((lines[-1]['calls'], lines[-1]['stopped']), (2, 'max-calls'))
-        self.assertEqual(self.failure_file()['counts'], {})
+        self.assertEqual(self.failure_file(), {'counts': {}, 'last_stop': [], 'forgiven': [], 'errors': {}})
         code, lines = self.run_report()
         # The three targets the retry did not reach and the good target, which also failed in the fourth run.
         self.assertEqual((lines[-1]['calls'], lines[-1]['skipped_failed']), (4, 0))
 
     def test_failed_entry_takes_the_error_of_the_new_cycle(self):
-        """Third review blocking 2: after a retry the targets fail with another error."""
+        """After a retry the targets fail with another error: the failed entries take it."""
         self.fail_four_runs()
         failed = [e for e in self.canonical()['entries'] if e['kind'] == 'failed']
         self.assertTrue(all('Prompt is too long' in e['last_error'] for e in failed))
@@ -436,8 +442,91 @@ class RunnerFixes(Env):
         self.assertEqual(len(failed), 5)
         self.assertTrue(all('usage limit' in e['last_error'] for e in failed), [e['last_error'] for e in failed])
 
+    def bad_copies(self, n):
+        """Copies whose text holds BADTARGET; with FAKE_BAD_FAIL the fake CLI fails on them only."""
+        data = (self.cache / 'admrule' / f'{ADM}.xml').read_bytes()
+        old = '외국인 및 재외국민의'.encode()
+        out = []
+        for i in range(1, n + 1):
+            p = self.cache / 'admrule' / f'bad{i}.xml'
+            p.write_bytes(data.replace(old, f'BADTARGET-{i} '.encode() + old, 1))
+            out.append(dict(self.target(), key=dict(KEY, source_sha256=ledger.file_sha256(p)), path=f'admrule/bad{i}.xml'))
+        os.environ['FAKE_BAD_FAIL'] = '1'
+        self.addCleanup(os.environ.pop, 'FAKE_BAD_FAIL', None)
+        return out
+
+    def failed_rows(self):
+        return [(e['model'], e['failures'], 'Prompt is too long' in e['last_error'])
+                for e in self.canonical()['entries'] if e['kind'] == 'failed']
+
+    def test_retry_after_a_first_stop_empties_forgiven(self):
+        """One first stop, then a retry whose calls succeed: the record is empty, forgiven included."""
+        self.set_targets(self.bad_copies(5) + [self.target()])
+        self.run_report()
+        self.assertEqual(len(self.failure_file()['forgiven']), 5)
+        os.environ.pop('FAKE_BAD_FAIL')
+        self.run_report('--retry-failed', max_calls=2)
+        self.assertEqual(self.failure_file(), {'counts': {}, 'last_stop': [], 'forgiven': [], 'errors': {}})
+
+    def test_failed_entry_takes_a_new_failure_count(self):
+        """A failed entry of a first cycle (failures 3); after a retry the same target ends a new cycle with
+        failures 4 and the same error (a first stop takes a failure back, the same stop adds it again)."""
+        bad = self.bad_copies(5)
+        x, others, good = bad[0], bad[1:], self.target()
+        self.set_targets([x, good])
+        for _ in range(4):
+            self.run_report()
+        self.assertEqual(self.failed_rows(), [('m1', 3, True)])
+        self.run_report('--retry-failed')
+        self.run_report()
+        self.set_targets([x] + others)
+        for _ in range(3):
+            self.run_report()
+        self.assertEqual(self.failure_file()['counts'][FKEY_OF(x)], 4)
+        self.assertEqual(self.failed_rows(), [('m1', 4, True)])
+
+    def test_failed_entry_takes_the_new_policy(self):
+        """A failed entry under m1; under m2 the same target fails three times again with the same error."""
+        x = self.bad_copies(1)[0]
+        self.set_targets([x])
+        for _ in range(4):
+            self.run_report()
+        self.assertEqual(self.failed_rows(), [('m1', 3, True)])
+        self.run_report('--replace-policy', model='m2')
+        for _ in range(3):
+            self.run_report(model='m2')
+        self.assertEqual(self.failed_rows(), [('m2', 3, True)])
+
+    def test_gold_run_does_not_log_a_refused_call(self):
+        """measure/gold_run.py with ANTHROPIC_API_KEY set, twice, then once without the key and --cap 2."""
+        import subprocess
+        gold = self.tmp / 'gold'
+        gold.mkdir()
+        (gold / 'spec.json').write_text(json.dumps({'cases': [{'dataset': 'admrules', 'revision': ADM}]}), encoding='utf-8')
+        (gold / 'index.tsv').write_text('dataset\tidentity\tserial\tprom\tcls\tpath\nadmrules\t2111925\t' + ADM + '\t20090410\tx\tx\n',
+                                        encoding='utf-8')
+        fakebin = self.tmp / 'bin'
+        fakebin.mkdir()
+        shutil.copy(self.fake, fakebin / 'claude')
+        (fakebin / 'claude').chmod(0o755)
+        log = self.tmp / 'gold-calls.log'
+        base = {k: v for k, v in os.environ.items() if k != 'ANTHROPIC_API_KEY'}
+        base.update({'LDJ_CACHE': str(self.cache), 'LDJ_CALL_LOG': str(log), 'PYTHONDONTWRITEBYTECODE': '1', 'FAKE_MODE': 'ok',
+                     'PATH': str(fakebin) + os.pathsep + os.environ['PATH']})
+        script = Path(judge.__file__).resolve().parent / 'measure' / 'gold_run.py'
+        exits = []
+        for with_key in (True, True, False):
+            env = dict(base, ANTHROPIC_API_KEY='x') if with_key else base
+            p = subprocess.run([sys.executable, '-B', str(script), 'run', '--models', 'm1', '--spec', str(gold / 'spec.json'),
+                                '--index', str(gold / 'index.tsv'), '--out', str(self.tmp / 'gold-out'), '--cap', '2'],
+                               env=env, capture_output=True, text=True, timeout=300)
+            lines = len(log.read_text(encoding='utf-8').splitlines()) if log.exists() else 0
+            exits.append((p.returncode, lines))
+        self.assertEqual(exits, [(1, 0), (1, 0), (0, 1)])
+        self.assertTrue((self.tmp / 'gold-out' / 'm1' / f'admrules-{ADM}' / 'entry.json').exists())
+
     def test_replace_policy_count_skips_keys_of_the_run_policy(self):
-        """Counterexample X15: m1, then m2 on another key, then back to m1 counts only the m2 key."""
+        """m1, then m2 on another key, then back to m1: the count holds only the key without an m1 entry."""
         c = self.copies(2)
         self.set_targets([c[0]])
         self.run_report(model='m1')
@@ -696,8 +785,8 @@ class QueueFixes(Env):
         self.assertEqual(out['stale_entries'], {'ordinances': 0, 'admrules': 0})
 
     def test_entry_of_a_revision_that_left_the_list_is_not_stale(self):
-        """Counterexample X21: the revision left the protection list, keeps its excluded entry, and its scan
-        row has a valid XML date and so no scan SHA-256."""
+        """The revision left the protection list, keeps its excluded entry, and its scan row has a valid XML
+        date and so no scan SHA-256."""
         self.write_protected([{'dataset': 'admrules', 'revision': ADM, 'identity': '2111925', 'copies': [{'path': 'x', 'source_sha256': ADM_SHA}],
                                'decision_id': 'd', 'source': 's', 'expected': {}}])
         led = ledger.Ledger(self.ops, 'admrules')
