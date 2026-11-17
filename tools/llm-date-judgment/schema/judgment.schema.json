@@ -1,0 +1,18 @@
+{
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["outcome", "date", "basis_quote", "basis_field", "section_label", "proviso", "proviso_quote", "partial_enforcement", "attribution", "rules_applied", "reason"],
+  "properties": {
+    "outcome": {"type": "string", "enum": ["explicit_date", "promulgation_day", "label_date", "no_enforcement_clause", "relative_period", "conditional_or_external", "attribution_unclear", "insufficient_text"]},
+    "date": {"type": "string"},
+    "basis_quote": {"type": "string"},
+    "basis_field": {"type": "string", "enum": ["부칙", "조문", "제개정이유", "개정문", ""]},
+    "section_label": {"type": "string"},
+    "proviso": {"type": "boolean"},
+    "proviso_quote": {"type": "string"},
+    "partial_enforcement": {"type": "array", "items": {"type": "object", "additionalProperties": false, "required": ["quote", "date"], "properties": {"quote": {"type": "string"}, "date": {"type": "string"}}}},
+    "attribution": {"type": "string"},
+    "rules_applied": {"type": "array", "items": {"type": "string"}},
+    "reason": {"type": "string"}
+  }
+}
