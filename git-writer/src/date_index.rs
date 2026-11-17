@@ -7445,6 +7445,8 @@ impl DatePlan {
         // The result of each copy that has a usable cross-check: the evidence and, for a
         // disagreement, the LLM date.
         let mut results: Vec<Option<(Value, Option<String>)>> = vec![None; self.revisions.len()];
+        // The entry fields of each copy, which a copy-withheld row keeps at the top level (5).
+        let mut commons: Vec<Option<Value>> = vec![None; self.revisions.len()];
         for (index, revision) in self.revisions.iter().enumerate() {
             let Some(entry) =
                 ledger.find_cross(&revision.identity, &revision.revision, &revision.copy_id)
@@ -7469,6 +7471,7 @@ impl DatePlan {
                 "quote": entry.quote,
                 "section_label": entry.section_label,
             });
+            commons[index] = Some(evidence.clone());
             let first = &revision.occurrences[0];
             let not_applied = |reason: &str, detail: Value| -> (Value, Option<String>) {
                 let mut value = evidence.clone();
@@ -7579,11 +7582,26 @@ impl DatePlan {
                 let parser_status = first.status.clone();
                 let parser_date = first.enforcement_date.clone();
                 let own = results[*index].take();
-                let mut evidence = match own {
-                    Some((evidence, Some(_))) => evidence,
-                    Some((evidence, None)) => json!({"result": "copy-withheld",
-                        "decision": "lead-c2-crosscheck-demote-20261117", "own": evidence}),
-                    None => json!({"result": "copy-withheld",
+                let own_date = own.as_ref().and_then(|(_, date)| date.clone());
+                let mut evidence = match (own, commons[*index].take()) {
+                    (Some((evidence, Some(_))), _) => evidence,
+                    // A copy with its own entry keeps the entry fields at the top level and its
+                    // own result (result, reason and their details) in `own`.
+                    (Some((evidence, None)), Some(mut common)) => {
+                        let own: serde_json::Map<String, Value> = evidence
+                            .as_object()
+                            .into_iter()
+                            .flatten()
+                            .filter(|(name, _)| common.get(name.as_str()).is_none())
+                            .map(|(name, value)| (name.clone(), value.clone()))
+                            .collect();
+                        if let Some(object) = common.as_object_mut() {
+                            object.insert("result".to_owned(), json!("copy-withheld"));
+                            object.insert("own".to_owned(), Value::Object(own));
+                        }
+                        common
+                    }
+                    _ => json!({"result": "copy-withheld",
                         "decision": "lead-c2-crosscheck-demote-20261117"}),
                 };
                 let mut candidates =
@@ -7599,10 +7617,16 @@ impl DatePlan {
                     }
                     object.insert("candidate_dates".to_owned(), json!(candidates));
                 }
+                // A disagreeing copy names its own LLM date; a withheld copy names the dates of
+                // the disagreeing copies (5).
+                let reason_dates = match own_date {
+                    Some(date) => date,
+                    None => llm_dates.iter().cloned().collect::<Vec<_>>().join(", "),
+                };
                 let reason = format!(
                     "effective date is unresolved; LLM 교차 확인 불일치: 파서 {}, LLM {}",
                     parser_date.as_deref().unwrap_or(""),
-                    llm_dates.iter().cloned().collect::<Vec<_>>().join(", ")
+                    reason_dates
                 );
                 let target = &mut self.revisions[*index];
                 for occurrence in &mut target.occurrences {
@@ -7631,7 +7655,7 @@ impl DatePlan {
             target.date_evidence = first.date_evidence;
         }
         // 6: a withdrawn repeal that the repeal-before-effective rule named for another revision.
-        let mut refs = Vec::new();
+        let mut refs: BTreeSet<(String, String, String)> = BTreeSet::new();
         for revision in &self.revisions {
             for occurrence in &revision.occurrences {
                 let Some(repeal) =
@@ -7640,12 +7664,21 @@ impl DatePlan {
                     continue;
                 };
                 if withdrawn.contains(&(revision.identity.clone(), repeal.to_owned())) {
-                    refs.push(json!({"revision": {"identity": revision.identity, "revision": revision.revision},
-                        "repeal": {"identity": revision.identity, "revision": repeal}}));
+                    refs.insert((
+                        revision.identity.clone(),
+                        revision.revision.clone(),
+                        repeal.to_owned(),
+                    ));
                 }
             }
         }
-        refs.dedup();
+        let refs: Vec<Value> = refs
+            .into_iter()
+            .map(|(identity, revision, repeal)| {
+                json!({"revision": {"identity": identity, "revision": revision},
+                    "repeal": {"identity": identity, "revision": repeal}})
+            })
+            .collect();
         if !refs.is_empty()
             && let Some(object) = self.llm.as_mut().and_then(Value::as_object_mut)
         {
@@ -20822,13 +20855,28 @@ mod llm_tests {
             "일부개정",
             "부칙\n이 조례는 공포 후 1개월이 경과한 날부터 시행한다.",
         );
-        let mut plain = without(std::slice::from_ref(&one));
-        plain.revisions[0].occurrences[0].status = "unresolved".to_owned();
+        let plain = without(std::slice::from_ref(&one));
+        assert_eq!(plain.occurrence(0).status, "unresolved");
         let ledger = cross_ledger(&plain, &[(0, "2011-01-01", None, "cross-sentence")], None);
-        plain.check_llm_cross(&ledger);
-        let found = plain.occurrence(0);
-        assert_eq!(found.status, "unresolved");
+        let built = plan(vec![one], &ledger);
+        let (found, before) = (built.occurrence(0), plain.occurrence(0));
+        assert_eq!(
+            (
+                found.status.as_str(),
+                found.enforcement_date.as_deref(),
+                found.exposure_date.as_deref(),
+                found.reason.as_str()
+            ),
+            (
+                before.status.as_str(),
+                before.enforcement_date.as_deref(),
+                before.exposure_date.as_deref(),
+                before.reason.as_str()
+            )
+        );
+        assert_eq!(cross(found)["result"], "not-applied");
         assert_eq!(cross(found)["reason"], "parser-not-dated");
+        assert_eq!(other_evidence(found), before.date_evidence);
     }
 
     #[test]
@@ -20884,6 +20932,93 @@ mod llm_tests {
             json!([built.revisions[0].copy_id])
         );
         assert_eq!(second.date_evidence["date_withheld"], "llm-cross-check");
+    }
+
+    #[test]
+    fn a_withheld_copy_keeps_its_entry_and_its_own_result() {
+        // 4.6 and 5: a withheld copy with its own entry keeps the entry fields at the top level
+        // and its own result in `own`; each disagreeing copy names its own LLM date.
+        let one = dated("700112", "20110101", "20110301");
+        let mut agreeing = one.clone();
+        agreeing.xml.extend_from_slice(b"\n");
+        let mut invalid = one.clone();
+        invalid.xml.extend_from_slice(b"\n\n");
+        let mut later = one.clone();
+        later.xml.extend_from_slice(b"\n\n\n");
+        let sources = vec![one, agreeing, invalid, later];
+        let plain = without(&sources);
+        let ledger = cross_ledger(
+            &plain,
+            &[
+                (0, "2011-01-01", None, "cross-sentence"),
+                (1, "2011-03-01", None, "cross-sentence"),
+                (2, "2011-02-30", None, "cross-sentence"),
+                (3, "2011-02-01", None, "cross-sentence"),
+            ],
+            None,
+        );
+        let built = plan(sources, &ledger);
+        let copy_ids: Vec<String> = built
+            .revisions
+            .iter()
+            .map(|revision| revision.copy_id.clone())
+            .collect();
+        let found: Vec<&Occurrence> = (0..4).map(|index| built.occurrence(index)).collect();
+        assert!(
+            found
+                .iter()
+                .all(|occurrence| occurrence.status == "unresolved")
+        );
+        let results: Vec<&Value> = found
+            .iter()
+            .map(|occurrence| &cross(occurrence)["result"])
+            .collect();
+        assert_eq!(
+            results,
+            ["disagree", "copy-withheld", "copy-withheld", "disagree"]
+        );
+        // The disagreeing copies in the order of the plan.
+        let disagreeing: Vec<String> = [0, 3]
+            .iter()
+            .map(|index| copy_ids[built.source_revision[*index]].clone())
+            .collect();
+        let mut listed: Vec<String> =
+            serde_json::from_value(cross(found[1])["disagree_copy_ids"].clone()).unwrap();
+        listed.sort();
+        let mut expected = disagreeing.clone();
+        expected.sort();
+        assert_eq!(listed, expected);
+        assert_eq!(cross(found[1])["own"], json!({"result": "agree"}));
+        assert_eq!(
+            cross(found[2])["own"],
+            json!({"result": "not-applied", "reason": "invalid-date", "date": "2011-02-30"})
+        );
+        for withheld in [found[1], found[2]] {
+            assert_eq!(cross(withheld)["quote"], "q");
+            assert_eq!(cross(withheld)["model"], "m");
+            assert_eq!(
+                cross(withheld)["parser_rule"],
+                cross(found[0])["parser_rule"]
+            );
+            assert_eq!(
+                withheld.reason,
+                "effective date is unresolved; LLM 교차 확인 불일치: 파서 2011-03-01, LLM 2011-01-01, 2011-02-01"
+            );
+        }
+        assert_eq!(
+            found[0].reason,
+            "effective date is unresolved; LLM 교차 확인 불일치: 파서 2011-03-01, LLM 2011-01-01"
+        );
+        assert_eq!(
+            found[3].reason,
+            "effective date is unresolved; LLM 교차 확인 불일치: 파서 2011-03-01, LLM 2011-02-01"
+        );
+        assert_eq!(
+            cross(found[0])["candidate_dates"],
+            json!([{"source": "parser", "date": "2011-03-01", "status": "confirmed"},
+                {"source": "llm", "date": "2011-01-01"}, {"source": "llm", "date": "2011-02-01"}])
+        );
+        assert!(cross(found[0]).get("own").is_none());
     }
 
     #[test]
@@ -20946,6 +21081,73 @@ mod llm_tests {
         );
         assert_eq!(message("confirmed", "r"), message("confirmed", "r"));
         assert_ne!(message("confirmed", "r"), message("confirmed", "s"));
+        assert_ne!(message("confirmed", "r"), message("unresolved", "r"));
+        // Each other argument reaches the message.
+        let base = message("confirmed", "r");
+        for changed in [
+            revision_commit_message(
+                "admrules",
+                "조례",
+                "test",
+                "1",
+                "700111",
+                "confirmed",
+                "r",
+                "2011-03-01",
+            ),
+            revision_commit_message(
+                "ordinances",
+                "규칙",
+                "test",
+                "1",
+                "700111",
+                "confirmed",
+                "r",
+                "2011-03-01",
+            ),
+            revision_commit_message(
+                "ordinances",
+                "조례",
+                "other",
+                "1",
+                "700111",
+                "confirmed",
+                "r",
+                "2011-03-01",
+            ),
+            revision_commit_message(
+                "ordinances",
+                "조례",
+                "test",
+                "2",
+                "700111",
+                "confirmed",
+                "r",
+                "2011-03-01",
+            ),
+            revision_commit_message(
+                "ordinances",
+                "조례",
+                "test",
+                "1",
+                "700112",
+                "confirmed",
+                "r",
+                "2011-03-01",
+            ),
+            revision_commit_message(
+                "ordinances",
+                "조례",
+                "test",
+                "1",
+                "700111",
+                "confirmed",
+                "r",
+                "2011-03-02",
+            ),
+        ] {
+            assert_ne!(changed, base);
+        }
         assert!(message("llm", "r").starts_with("조례: test (LLM 판단)\n"));
         assert!(message("estimated", "r").starts_with("조례: test (추정)\n"));
     }
