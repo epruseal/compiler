@@ -9,8 +9,15 @@ compiler#1 heading rule). A judgment with a date is adoptable only when every re
   date_valid     the date is a real calendar date and not 9999-12-31
   verb           the quote holds an enforcement verb in predicate form: 시행 or 施行 followed by a
                  final or connective ending (한다, 합니다, 함, 된다, 됩니다, 됨, 하며, 하고, 하되,
-                 하나, 시킨다, sentence end) or 효력 발생 in the same forms. An attributive or
-                 nominal form (시행되는, 시행된, 시행됨에 따라, 시행함에 있어) is not a predicate.
+                 하나, 시킨다, sentence end) or 효력 발생 in the same forms. A final ending (one that
+                 ends in 다, 함, 됨 or 킴) counts only when the next character of the field is a
+                 sentence or clause mark (. 。 , ， ;), a closing mark (" ' ” ’ » ) ] 」 』) or the
+                 field end. Every other follower (는, 고, 면, 던, 며, 지, 니, 에, 과 and so on) makes a
+                 quoted, connective or nominal use, and the followers are an open set, so the check
+                 lists the allowed followers and not the refused ones. A line end is not a sentence
+                 end (user decision 2026-11-09: forced line breaks split sentences after 다 and 함;
+                 lead-compiler2-line-end-20261116). An attributive or nominal form (시행되는, 시행된,
+                 시행됨에 따라, 시행함에 있어) is not a predicate.
   section        when the field holds two or more headings, or for label_date: the section label
                  lies on a heading line and the quote lies inside that heading's section
   not_quoted     the occurrence that passes the section check starts outside quotation marks, and
@@ -41,14 +48,14 @@ DATED = ('explicit_date', 'promulgation_day', 'label_date')
 UNDATED = ('no_enforcement_clause', 'relative_period', 'conditional_or_external', 'attribution_unclear', 'insufficient_text')
 
 END = '¶'  # end-of-field mark appended to a predicate window; never in source text
-NOT_NOUN = r'(?![에으이을의과은도만])'
-ENDING = (r'(?:한다(?![는고면])|합니다|하였다(?![는고])|했다(?![는고])|하며|하고(?![있자])|하되|하나(?![의])'
-          r'|하기로한다(?![는고])|함' + NOT_NOUN +
-          r'|된다(?![는고면])|됩니다|되었다(?![는고])|됐다(?![는고])|되며|되고(?![있자])|되되|됨' + NOT_NOUN +
-          r'|시킨다(?![는고면])|시킵니다|시킴' + NOT_NOUN + r'|토록한다|키로한다|(?=[.。' + END + r']))')
+# Final endings carry no look-ahead here: Field.anchors reads the character after them (FINAL_TAIL).
+ENDING = (r'(?:하기로한다|토록한다|키로한다|한다|합니다|하였다|했다|하며|하고(?![있자])|하되|하나(?![의])|함'
+          r'|된다|됩니다|되었다|됐다|되며|되고(?![있자])|되되|됨'
+          r'|시킨다|시킵니다|시킴|(?=[.。' + END + r']))')
 PRED = (r'(?:(?P<st>시행|施行(?![令規]))' + ENDING +
-        r'|(?P<ef>효력)(?:을|이)?발생(?:한다(?![는고면])|합니다|하였다(?![는고])|했다(?![는고])|하며|하고(?![있자])|하되|함'
-        + NOT_NOUN + r'|(?=[.。' + END + r'])))')
+        r'|(?P<ef>효력)(?:을|이)?발생(?:한다|합니다|하였다|했다|하며|하고(?![있자])|하되|함|(?=[.。' + END + r'])))')
+FINAL_ENDS = ('다', '함', '됨', '킴')
+FINAL_TAIL = set('.。,，;"\'”’»)]」』')
 PRED_RE = re.compile(PRED)
 SEP = r'[.·ㆍ\-/,]'
 # One grammar for every written date with a four-digit year: 년 or a separator after the year,
@@ -86,7 +93,7 @@ class Field:
 
     def __init__(self, raw):
         chars, depth, self.heads, self.line_starts = [], [], [], []
-        for line in (raw or '').split('\n'):
+        for line in (raw or '').replace('\r\n', '\n').replace('\r', '\n').split('\n'):
             self.line_starts.append(len(chars))
             if HEADING_LINE_RE.match(line):
                 self.heads.append(len(chars))
@@ -154,6 +161,13 @@ class Field:
         lpos = self.text.find(label, start)
         return 0 <= lpos < self.line_end(start) and lpos + len(label) <= pos
 
+    def final_ok(self, q, matched):
+        """A match that ends in a final ending is a predicate only when the field character at q is
+        an allowed follower or q is the field end."""
+        if not matched.endswith(FINAL_ENDS):
+            return True
+        return q >= len(self.text) or self.text[q] in FINAL_TAIL
+
     def free(self, pos):
         return 0 <= pos < len(self.depth) and self.depth[pos] == 0
 
@@ -170,6 +184,8 @@ class Field:
         for m in regex.finditer(window):
             stem = m.start('st') if m.group('st') else m.start('ef')
             if m.start() >= span or stem + 2 > span:
+                continue
+            if not self.final_ok(pos + m.end(), m.group(0)):
                 continue
             value = value_of(m)
             if value is None:

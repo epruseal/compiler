@@ -170,8 +170,10 @@ class PredicateAndQuotes(unittest.TestCase):
         text = '상위 법령이 2009. 6. 27.부터 시행됨에 따라 관련 조문을 정비함.'
         ok, r = checks.check(judgment('explicit_date', '2009-06-27', text, field='제개정이유'), meta('2009-04-10', 'admrules'), {'제개정이유': text})
         self.assertFalse(ok)
-        q2 = '사업을 시행함에 있어 필요한 사항은 2010. 1. 1.부터 시행함에 있어'
-        self.assertFalse(checks.PRED_RE.search(checks.compact('시행함에 있어')))
+        q2 = '이 조례는 2010. 1. 1.부터 시행함에 있어 필요한 사항을 정한다.'
+        ok, r = checks.check(judgment('explicit_date', '2010-01-01', q2, field='제개정이유'), meta('2009-04-10', 'admrules'), {'제개정이유': q2})
+        self.assertFalse(ok)
+        self.assertFalse(r['verb'])
 
     def test_quote_inside_quotation_marks_cut_or_whole(self):
         text = '부칙 제2조 중 "이 조례는 공포한 날부터 시행한다"를 삭제함.'

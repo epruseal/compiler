@@ -122,8 +122,12 @@ class RunnerTests(Env):
         judge.STOP_AFTER_FAILURES = 1
         os.environ['FAKE_MODE'] = 'exit1'
         self.assertEqual(self.run_judge(), 3)
+        # The run of failures that stopped the run does not count against the target.
+        fails = next((self.ops / 'failures').rglob('failures-admrules.json'))
+        self.assertEqual(json.loads(fails.read_text()), {'|'.join(('admrules', '2111925', ADM, ADM_SHA)): 0})
         judge.STOP_AFTER_FAILURES = 5
         judge.TARGET_FAILURE_LIMIT = 1
+        self.assertEqual(self.run_judge(), 0)
         os.environ['FAKE_MODE'] = 'ok'
         self.run_judge()
         self.assertEqual(len(self.canonical()['entries']), 0)
@@ -214,7 +218,8 @@ class QueueTests(Env):
         self.assertEqual(len(pending['targets']), 1)
         t = pending['targets'][0]
         self.assertEqual(t['next_promulgation'], '2010-01-01')
-        self.assertEqual(t['parser'], {'category': 'parser_category_pending'})
+        self.assertEqual(t['parser'], {'category': 'parser_category_pending', 'manifest_sha256': None})
+        self.assertEqual(t['first_seen'], '20261117')
         self.build()
         self.assertEqual(len(ledger.read_lines(self.ops / 'queue' / 'new-20261117.jsonl')[0]), 1)
         self.assertEqual(len(ledger.read_lines(self.ops / 'queue' / 'seen.jsonl')[0]), 1)
@@ -274,8 +279,10 @@ class ProtectionListTests(unittest.TestCase):
         _, revisions, _ = ledger.load_protected(self.DATA)
         text = self.DOC.read_text(encoding='utf-8')
         section = text.split('<!-- protected-revisions:start -->')[1].split('<!-- protected-revisions:end -->')[0]
-        documented = set(re.findall(r'^\| (\d+) \|', section, re.M))
-        self.assertEqual(documented, {r['revision'] for r in revisions})
+        rows = [[c.strip() for c in line.strip().strip('|').split('|')] for line in section.splitlines()
+                if re.match(r'^\| \d+ \|', line)]
+        expected = [[r['revision'], r['dataset'], r['record_result'] or '', r['decision_id'], r['source']] for r in revisions]
+        self.assertEqual(sorted(rows), sorted(expected))
 
 
 class SourceTextTests(unittest.TestCase):

@@ -4,16 +4,20 @@ Commands:
   one  judge one source file and print the entry (measurement and debugging; writes no ledger)
   run  judge the targets of a queue file into the ledger of an operations folder
 
-run takes the operations lock, compacts the ledger, skips protected revisions and keys that hold a
-current-policy entry, restores entries from raw responses whose call arguments match the policy,
-calls the CLI for the rest up to --max-calls, stops after 5 consecutive calls without a judgment,
-skips a target after 3 failures, and compacts again at the end. See docs/llm-date-judgment.md.
+run refuses to start when ANTHROPIC_API_KEY is set, takes the operations lock, refuses a model,
+effort or prompt that differs from the ledger policy unless --replace-policy is given, compacts the
+ledger, skips protected revisions and keys that hold a current-policy entry, restores an entry from a
+raw response only for a key without an entry, calls the CLI for the rest up to --max-calls, stops
+after 5 consecutive calls without a judgment (those 5 do not count against their targets), skips a
+target that failed 3 times, and compacts again at the end. See docs/llm-date-judgment.md.
 """
 import argparse
 import datetime
 import fcntl
 import hashlib
 import json
+import os
+import re
 import subprocess
 import sys
 import time
@@ -26,7 +30,7 @@ import checks  # noqa: E402
 import ledger as ledger_mod  # noqa: E402
 import source_text  # noqa: E402
 
-RUNNER_VERSION = 'r1'
+RUNNER_VERSION = 'r2'
 PROMPT_FILE = HERE / 'prompts' / 'v2.md'
 SCHEMA_FILE = HERE / 'schema' / 'judgment.schema.json'
 PROMPT_TAG = 'p2'
@@ -35,6 +39,8 @@ SYSTEM = ('너는 한국 법규 원문에서 시행일 문장을 판독하는 �
 STOP_AFTER_FAILURES = 5
 TARGET_FAILURE_LIMIT = 3
 FREE_TEXT = ('basis_quote', 'section_label', 'proviso_quote', 'attribution', 'reason')
+# The policy fields that decide a call; runner_version changes only the checks (recheck, no new call).
+JUDGE_POLICY_KEYS = ('model', 'effort', 'prompt_version')
 
 
 def prompt_version(template, schema):
@@ -83,11 +89,22 @@ def render(template, meta, fields, next_promulgation):
     return template.replace('{meta}', '\n'.join(lines)).replace('{fields}', '\n\n'.join(blocks)), excerpt
 
 
+CONTROL = re.compile(r'[\x00-\x1f\x7f]')
+
+
+def flat(text):
+    """Control characters and line breaks become one space; white space runs become one space."""
+    return ' '.join(CONTROL.sub(' ', text).split())
+
+
 def one_line(judgment):
     out = dict(judgment)
     for k in FREE_TEXT:
         if isinstance(out.get(k), str):
-            out[k] = ' '.join(out[k].split())
+            out[k] = flat(out[k])
+    if isinstance(out.get('partial_enforcement'), list):
+        out['partial_enforcement'] = [dict(p, quote=flat(p['quote'])) if isinstance(p, dict) and isinstance(p.get('quote'), str) else p
+                                      for p in out['partial_enforcement']]
     return out
 
 
@@ -114,6 +131,15 @@ def parse_response(stdout):
     judgment = response.get('structured_output')
     if response.get('is_error') or not isinstance(judgment, dict):
         return None, info
+    return judgment, info
+
+
+def response_of(stdout, exit_code):
+    """(judgment or None, call info). A judgment needs exit 0; a non-zero exit keeps the error summary
+    of the response but never gives a judgment."""
+    judgment, info = parse_response(stdout)
+    if exit_code != 0:
+        return None, dict(info, error=f'exit {exit_code}')
     return judgment, info
 
 
@@ -154,6 +180,7 @@ def recheck_factory(cache):
         fixed = dict(entry)
         fixed.update({'checks': results, 'adoptable': adoptable, 'date': entry['judgment'].get('date') if adoptable else '',
                       'runner_version': RUNNER_VERSION})
+        fixed['cross_check_at_judgment'] = cross_check({'parser': entry.get('parser_at_judgment')}, fixed)
         return fixed
     return recheck
 
@@ -163,8 +190,8 @@ def raw_root(ops, policy):
 
 
 def find_raw(ops, policy, sha):
-    """The newest raw call for this source whose call arguments match the policy and that holds a
-    usable judgment, or None."""
+    """The newest raw call for this source whose call arguments match the policy (model, effort,
+    prompt_version; design section 17), that ended with exit 0 and that holds a usable judgment, or None."""
     root = raw_root(ops, policy)
     if not root.exists():
         return None
@@ -174,12 +201,20 @@ def find_raw(ops, policy, sha):
             judgment, info = parse_response((d / 'stdout.json').read_text(encoding='utf-8'))
         except (OSError, ValueError):
             continue
-        if all(args.get(k) == policy[k] for k in ledger_mod.POLICY_KEYS) and judgment is not None and args.get('exit') == 0:
+        if all(args.get(k) == policy[k] for k in JUDGE_POLICY_KEYS) and judgment is not None and args.get('exit') == 0:
             return d, args, judgment, info
     return None
 
 
+def failures_root(ops, policy):
+    return Path(ops) / 'failures' / policy['prompt_version'] / policy['model'] / policy['effort']
+
+
 def run(args):
+    if 'ANTHROPIC_API_KEY' in os.environ:
+        # user-compiler2-shunt-path-20261116: the runner never uses a paid API key.
+        print('ANTHROPIC_API_KEY is set; the runner does not use a paid API key', file=sys.stderr)
+        return 2
     ops = Path(args.ops)
     ops.mkdir(parents=True, exist_ok=True)
     lock = open(ops / 'lock', 'w')
@@ -188,49 +223,75 @@ def run(args):
     except OSError:
         print('another runner holds the operations lock', file=sys.stderr)
         return 75
-    for tmp in (ops / 'ledger').glob('.tmp-*') if (ops / 'ledger').exists() else []:
-        tmp.unlink()
+    ledger_mod.remove_temporary(ops / 'ledger', ops / 'ledger-history', ops / 'failures')
     template, schema, pversion = current_prompt()
     policy = {'model': args.model, 'effort': args.effort, 'prompt_version': pversion, 'runner_version': RUNNER_VERSION}
     protected, revisions, list_sha = ledger_mod.load_protected(args.protected)
     led = ledger_mod.Ledger(ops, args.dataset)
+    targets = json.loads(Path(args.targets).read_text(encoding='utf-8'))['targets']
+    held = led.load()['policy']
+    if held is not None and any(held[k] != policy[k] for k in JUDGE_POLICY_KEYS):
+        # lead-compiler2-f3-20261116: a policy change makes every key a new call, so it needs an
+        # explicit argument and the count comes first.
+        if not args.replace_policy:
+            print(json.dumps({'refused': 'run policy differs from the ledger policy; pass --replace-policy to change it',
+                              'ledger_policy': held, 'run_policy': policy}, ensure_ascii=False))
+            return 4
+        current = {ledger_mod.key_of(e): e for e in led.load()['entries']}
+        count = sum(1 for t in targets if t['key']['dataset'] == args.dataset
+                    and (t['key']['dataset'], t['key']['revision']) not in protected
+                    and not ledger_mod.policy_matches(current.get(tuple(t['key'][f] for f in ledger_mod.KEY_FIELDS), {}), policy))
+        print(json.dumps({'replace_policy': {'from': held, 'to': policy, 'targets_to_judge': count, 'max_calls': args.max_calls}},
+                         ensure_ascii=False))
+    ledger_mod.repair(led.journal)
     led.protect(protected, revisions)
     report = {'compaction_start': led.compact(policy, protected, list_sha, recheck_factory(args.cache))}
     entries = {ledger_mod.key_of(e): e for e in led.load()['entries']}
-    failures_path = ops / f'failures-{args.dataset}.json'
+    failures_path = failures_root(ops, policy) / f'failures-{args.dataset}.json'
     failures = json.loads(failures_path.read_text(encoding='utf-8')) if failures_path.exists() else {}
-    targets = json.loads(Path(args.targets).read_text(encoding='utf-8'))['targets']
-    calls = restored = skipped_protected = skipped_failed = skipped_done = 0
-    consecutive = 0
+    calls = restored = skipped_protected = skipped_done = 0
+    skipped_failed_keys, skipped_source_changed_keys = [], []
+    streak = []
     stopped = None
     workdir = ops / 'empty-cwd'
     workdir.mkdir(exist_ok=True)
     calls_log = ops / 'calls.log'
+
+    def save_failures():
+        ledger_mod.atomic_write(failures_path, json.dumps(failures, ensure_ascii=False, indent=1, sort_keys=True) + '\n')
+
     for t in targets:
         key = t['key']
         if key['dataset'] != args.dataset:
             continue
         k = tuple(key[f] for f in ledger_mod.KEY_FIELDS)
+        fkey = '|'.join(k)
         if (key['dataset'], key['revision']) in protected:
             skipped_protected += 1
             continue
         if k in entries and ledger_mod.policy_matches(entries[k], policy):
             skipped_done += 1
             continue
-        fkey = '|'.join(k)
         if failures.get(fkey, 0) >= TARGET_FAILURE_LIMIT:
-            skipped_failed += 1
+            skipped_failed_keys.append(fkey)
             continue
         source = Path(args.cache) / t['path']
+        if not source.exists():
+            skipped_source_changed_keys.append(fkey)
+            continue
         meta, fields = source_text.read_source(source, key['dataset'])
         if meta['source_sha256'] != key['source_sha256']:
-            skipped_failed += 1
+            skipped_source_changed_keys.append(fkey)
             continue
-        found = find_raw(ops, policy, key['source_sha256'])
+        # Design section 17: a raw response is restored only for a key that has no entry; a key with
+        # an entry of another policy or an old runner that failed its recheck is judged again.
+        found = find_raw(ops, policy, key['source_sha256']) if k not in entries else None
         if found is not None:
             d, call_args, judgment, info = found
             raw_ref = {'path': str(d.relative_to(ops)), 'stdout_sha256': ledger_mod.file_sha256(d / 'stdout.json')}
-            led.add(build_entry(t, meta, fields, judgment, policy, raw_ref, info.get('usage'), call_args.get('body_excerpt'), call_args['judged_at']))
+            seen_target = dict(t, next_promulgation=call_args.get('next_promulgation'))
+            usage = dict(info.get('usage') or {}, seconds=call_args.get('seconds'), total_cost_usd=info.get('total_cost_usd'))
+            led.add(build_entry(seen_target, meta, fields, judgment, policy, raw_ref, usage, call_args.get('body_excerpt'), call_args['judged_at']))
             restored += 1
             continue
         if calls >= args.max_calls:
@@ -254,20 +315,28 @@ def run(args):
         call_args = dict(policy, key=key, exit=exit_code, seconds=seconds, judged_at=judged_at,
                          next_promulgation=t.get('next_promulgation'), body_excerpt=excerpt)
         (d / 'call-args.json').write_text(json.dumps(call_args, ensure_ascii=False, indent=1), encoding='utf-8')
-        judgment, info = parse_response(stdout) if exit_code == 0 else (None, {'error': f'exit {exit_code}'})
+        judgment, info = response_of(stdout, exit_code)
         if judgment is None:
             failures[fkey] = failures.get(fkey, 0) + 1
-            ledger_mod.atomic_write(failures_path, json.dumps(failures, ensure_ascii=False, indent=1, sort_keys=True) + '\n')
-            consecutive += 1
-            if consecutive >= STOP_AFTER_FAILURES:
+            save_failures()
+            streak.append(fkey)
+            if len(streak) >= STOP_AFTER_FAILURES:
+                # A run of failures is a shared cause (usage limit, login); it does not count
+                # against the targets that met it.
+                for f in streak:
+                    failures[f] -= 1
+                save_failures()
                 stopped = f'{STOP_AFTER_FAILURES} consecutive calls without a judgment; last: {info}'
                 break
             continue
-        consecutive = 0
+        streak = []
         raw_ref = {'path': str(d.relative_to(ops)), 'stdout_sha256': ledger_mod.file_sha256(d / 'stdout.json')}
-        led.add(build_entry(t, meta, fields, judgment, policy, raw_ref, dict(info.get('usage') or {}, seconds=seconds), excerpt, judged_at))
+        usage = dict(info.get('usage') or {}, seconds=seconds, total_cost_usd=info.get('total_cost_usd'))
+        led.add(build_entry(t, meta, fields, judgment, policy, raw_ref, usage, excerpt, judged_at))
     report.update({'calls': calls, 'restored': restored, 'skipped_protected': skipped_protected, 'skipped_done': skipped_done,
-                   'skipped_failed': skipped_failed, 'stopped': stopped})
+                   'skipped_failed': len(skipped_failed_keys), 'skipped_failed_keys': skipped_failed_keys,
+                   'skipped_source_changed': len(skipped_source_changed_keys),
+                   'skipped_source_changed_keys': skipped_source_changed_keys, 'stopped': stopped})
     report['compaction_end'] = led.compact(policy, protected, list_sha, recheck_factory(args.cache))
     print(json.dumps(report, ensure_ascii=False))
     return 3 if stopped and stopped != 'max-calls' else 0
@@ -297,7 +366,7 @@ def judge_file(dataset, source, model, effort, next_promulgation, out, claude_bi
         return entry
     (out / 'stdout.json').write_text(proc.stdout, encoding='utf-8')
     (out / 'stderr.txt').write_text(proc.stderr, encoding='utf-8')
-    judgment, info = parse_response(proc.stdout) if proc.returncode == 0 else (None, {'error': f'exit {proc.returncode}'})
+    judgment, info = response_of(proc.stdout, proc.returncode)
     entry['call'] = dict(info, exit=proc.returncode, seconds=seconds)
     entry['judgment'] = one_line(judgment) if judgment else None
     if judgment:
@@ -314,7 +383,7 @@ def one(args):
     meta, fields = source_text.read_source(args.source, args.dataset)
     prompt, excerpt = render(template, meta, fields, args.next_promulgation)
     proc, seconds = call_cli(args.claude, prompt, schema, args.model, args.effort, Path(args.workdir), args.timeout)
-    judgment, info = parse_response(proc.stdout) if proc.returncode == 0 else (None, {'error': f'exit {proc.returncode}'})
+    judgment, info = response_of(proc.stdout, proc.returncode)
     out = {'prompt_version': pversion, 'seconds': seconds, 'call': info}
     if judgment is not None:
         adoptable, results = checks.check(one_line(judgment), meta, fields, args.next_promulgation)
@@ -343,6 +412,8 @@ def main(argv=None):
     r.add_argument('--targets', required=True)
     r.add_argument('--protected', required=True)
     r.add_argument('--max-calls', type=int, required=True)
+    r.add_argument('--replace-policy', action='store_true',
+                   help='judge again under a model, effort or prompt that differs from the ledger policy')
     args = ap.parse_args(argv)
     return run(args) if args.cmd == 'run' else one(args)
 

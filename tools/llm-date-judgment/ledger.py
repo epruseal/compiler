@@ -71,14 +71,16 @@ def append_line(path, obj):
 
 
 def read_lines(path):
-    """Complete JSON lines of an append-only file. A cut last line is dropped and reported."""
+    """Complete JSON lines of an append-only file. A cut last line is dropped and reported.
+
+    The file is split into byte lines before decoding, so a line cut inside a multi-byte UTF-8
+    character spoils only that line."""
     path = Path(path)
     if not path.exists():
         return [], False
-    raw = path.read_text(encoding='utf-8')
-    lines = raw.split('\n')
+    lines = path.read_bytes().split(b'\n')
     cut = False
-    if lines and lines[-1] != '':
+    if lines and lines[-1] != b'':
         cut = True
         lines = lines[:-1]
     out = []
@@ -86,10 +88,28 @@ def read_lines(path):
         if not line:
             continue
         try:
-            out.append(json.loads(line, object_pairs_hook=_unique_object))
-        except ValueError:
+            out.append(json.loads(line.decode('utf-8'), object_pairs_hook=_unique_object))
+        except ValueError:  # UnicodeDecodeError is a ValueError
             cut = True
     return out, cut
+
+
+def repair(path):
+    """Rewrites an append-only file without its unreadable lines, so that a later append does not
+    join a cut line. Returns the complete lines."""
+    lines, cut = read_lines(path)
+    if cut:
+        atomic_write(path, ''.join(json.dumps(x, ensure_ascii=False, sort_keys=True) + '\n' for x in lines))
+    return lines
+
+
+def remove_temporary(*folders):
+    """Removes the .tmp-* files that a stopped atomic_write left, in the folders and below them."""
+    for folder in folders:
+        folder = Path(folder)
+        if folder.exists():
+            for tmp in folder.rglob('.tmp-*'):
+                tmp.unlink()
 
 
 def file_sha256(path):
@@ -136,7 +156,9 @@ class Ledger:
                 continue
             k = key_of(e)
             old = current.get(k)
-            if old is not None and old.get('judged_at') == e.get('judged_at') and old.get('kind') == e.get('kind'):
+            if old == e:
+                # The same line merged again after a stop between the canonical rename and the
+                # journal truncation.
                 continue
             if old is not None:
                 replaced.append(old)
@@ -152,9 +174,9 @@ class Ledger:
                 if fixed is not None and fixed != e:
                     replaced.append(e)
                     current[k] = fixed
-        seen_history = {(tuple(h['key'][f] for f in KEY_FIELDS), h.get('judged_at'), h.get('kind')) for h in read_lines(self.history)[0]}
+        seen_history = {mark_of(h) for h in repair(self.history)}
         for old in replaced:
-            mark = (key_of(old), old.get('judged_at'), old.get('kind'))
+            mark = mark_of(old)
             if mark not in seen_history:
                 append_line(self.history, old)
                 seen_history.add(mark)
@@ -180,6 +202,11 @@ class Ledger:
                     self.add(excluded_entry(key, r.get('source')))
                     added += 1
         return added
+
+
+def mark_of(entry):
+    """Identity of a history line: the whole entry, so two entries of one key never collide."""
+    return json.dumps(entry, ensure_ascii=False, sort_keys=True)
 
 
 def excluded_entry(key, source=None):
@@ -218,6 +245,8 @@ def load_protected(path):
         raise LedgerError('protection list format')
     out = {}
     for r in doc['revisions']:
+        if (r.get('dataset'), r.get('revision')) in out:
+            raise LedgerError(f'protection list holds {r.get("dataset")} {r.get("revision")} twice')
         for f in ('dataset', 'revision', 'identity', 'copies', 'decision_id', 'source', 'expected'):
             if f not in r:
                 raise LedgerError(f'protection list entry lacks {f}')

@@ -108,8 +108,11 @@ def body_for_prompt(body):
 def addenda_for_prompt(text, promulgation_raw, number):
     """The addenda as the prompt shows them. Cumulative addenda longer than ADDENDA_LIMIT become the
     last KEEP_LAST_SECTIONS sections plus every section whose heading line names this revision's
-    promulgation date or number, in source order; if that is still too long, the end is kept.
-    The mechanical checks still read the whole field."""
+    promulgation date or number, in source order. Sections stay whole with their heading lines. If
+    that is still too long, whole sections are dropped from the front; a last section that alone is
+    too long keeps its heading line and its end. The mechanical checks still read the whole field
+    (user decision 2026-11-16 on the addenda excerpt)."""
+    text = text.replace('\r\n', '\n').replace('\r', '\n')
     if len(text) <= ADDENDA_LIMIT:
         return text, False
     lines = text.split('\n')
@@ -129,14 +132,22 @@ def addenda_for_prompt(text, promulgation_raw, number):
     for k, (a, _) in enumerate(sections):
         if any(rx.search(lines[a]) for rx in marks):
             keep.add(k)
-    parts, last = [], -1
-    for k in sorted(keep):
-        if k != last + 1:
-            parts.append('…')
-        a, b = sections[k]
-        parts.append('\n'.join(lines[a:b]))
-        last = k
-    out = '\n'.join(parts)
+    def joined(kept):
+        parts, last = [], -1
+        for k in kept:
+            if k != last + 1:
+                parts.append('…')
+            a, b = sections[k]
+            parts.append('\n'.join(lines[a:b]))
+            last = k
+        return '\n'.join(parts)
+    kept = sorted(keep)
+    out = joined(kept)
+    while len(out) > ADDENDA_LIMIT and len(kept) > 1:
+        kept = kept[1:]
+        out = joined(kept)
     if len(out) > ADDENDA_LIMIT:
-        out = '…\n' + out[-ADDENDA_LIMIT:]
+        a, b = sections[kept[0]]
+        head = lines[a]
+        out = '…\n' + head + '\n…\n' + '\n'.join(lines[a + 1:b])[-(ADDENDA_LIMIT - len(head)):]
     return out, True
