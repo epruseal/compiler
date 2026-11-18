@@ -369,3 +369,36 @@ fn the_plain_validate_manifest_keeps_its_original_shape() {
     assert!(written.get("date_index").is_none());
     assert!(written.get("unparsable").is_none());
 }
+
+#[test]
+fn enforcement_revision_commits_carry_the_identity_lines_of_the_default_mode() {
+    // user-enforcement-mst-trailer-20261117: the keys and order of the default-mode commit.
+    let temp = tempfile::tempdir().unwrap();
+    let cache = temp.path().join("cache");
+    fs::create_dir(&cache).unwrap();
+    fs::write(cache.join("123.xml"), RULE_XML).unwrap();
+    let output = temp.path().join("out.git");
+    let manifest = temp.path().join("index.json");
+    let built = run(
+        &[&cache, &output, &manifest],
+        &["--commit-date-basis", "enforcement"],
+    );
+    assert!(built.status.success(), "{}", stderr(&built));
+    let log = std::process::Command::new("git")
+        .arg("--git-dir")
+        .arg(&output)
+        .args(["log", "--format=%x01%B"])
+        .output()
+        .unwrap();
+    let log = String::from_utf8(log.stdout).unwrap();
+    let revisions: Vec<&str> = log
+        .split('\u{1}')
+        .filter(|message| message.contains("\nrevision: "))
+        .collect();
+    assert_eq!(revisions.len(), 1, "{log}");
+    assert!(
+        revisions[0].contains("\n\n행정규칙일련번호: 123\n행정규칙ID: ABC\n\nEffective-Date: "),
+        "{}",
+        revisions[0]
+    );
+}
