@@ -1,0 +1,747 @@
+{
+ "approval_not_applied_keys": [
+  "reason",
+  "decision",
+  "observed",
+  "expected"
+ ],
+ "approval_not_applied_reason": "approved-sentence-blocked",
+ "bin_p9r4_occurrences": {
+  "1063983": {
+   "date_evidence": {
+    "approved_date_conflict": {
+     "decision": "user-1063983-explicit-clause-date-20261113",
+     "resolved_by": "user",
+     "selected_enforcement_date": "2007-06-01",
+     "source_enforcement_date": "20070530"
+    },
+    "approved_date_decision": "user-1063983-explicit-clause-date-20261113",
+    "approved_date_policy": "conditional-exception",
+    "approved_date_sentence": "이 규칙은 2007년 6월 1일부터 시행한다.",
+    "approved_date_sources": [
+     {
+      "container": "addendum:69",
+      "field": "부칙내용",
+      "source_ranges": [
+       [
+        69,
+        53,
+        96,
+        147
+       ]
+      ]
+     },
+     {
+      "container": "amendment_text",
+      "field": "제개정이유내용",
+      "source_ranges": [
+       [
+        88,
+        190,
+        0,
+        51
+       ]
+      ]
+     }
+    ],
+    "approved_date_user_choice": "이 판본은 문장 날짜",
+    "arrival_estimate": false,
+    "raw_enforcement_date": "20070530",
+    "raw_promulgation_date": "20070530",
+    "rule": "individually approved addendum date before the source effective date (user-1063983-explicit-clause-date-20261113)",
+    "source_path": "1063983.xml"
+   },
+   "enforcement_date": "2007-06-01",
+   "exposure_date": null,
+   "observed_metadata": {},
+   "promulgation_date": "2007-05-30",
+   "raw_enforcement_date": "20070530",
+   "raw_promulgation_date": "20070530",
+   "reason": "individually approved addendum date before the source effective date (user-1063983-explicit-clause-date-20261113)",
+   "source_path": "1063983.xml",
+   "status": "confirmed"
+  },
+  "2200000088451": {
+   "date_evidence": {
+    "approved_date_decision": "user-amendment-explicit-dates-20261113",
+    "approved_date_policy": "consume-approved-sentence",
+    "approved_date_sentence": "이 예규는 2009. 6. 27.부터 시행한다.",
+    "approved_date_sources": [
+     {
+      "container": "declaration",
+      "field": "개정문내용",
+      "source_ranges": [
+       [
+        26,
+        49,
+        0,
+        46
+       ]
+      ]
+     }
+    ],
+    "approved_date_user_choice": "개정문의 명시 날짜로 확정",
+    "arrival_estimate": false,
+    "raw_enforcement_date": "99991231",
+    "raw_promulgation_date": "20090410",
+    "rule": "individually approved explicit date of the amendment statement (user-amendment-explicit-dates-20261113)",
+    "source_path": "2200000088451.xml"
+   },
+   "enforcement_date": "2009-06-27",
+   "exposure_date": null,
+   "observed_metadata": {},
+   "promulgation_date": "2009-04-10",
+   "raw_enforcement_date": "99991231",
+   "raw_promulgation_date": "20090410",
+   "reason": "individually approved explicit date of the amendment statement (user-amendment-explicit-dates-20261113)",
+   "source_path": "2200000088451.xml",
+   "status": "confirmed"
+  },
+  "2200000104677": {
+   "date_evidence": {
+    "approved_date_decision": "user-amendment-explicit-dates-20261113",
+    "approved_date_policy": "consume-approved-sentence",
+    "approved_date_sentence": "이 예규는 1998.10. 7.부터 시행한다.",
+    "approved_date_sources": [
+     {
+      "container": "declaration",
+      "field": "개정문내용",
+      "source_ranges": [
+       [
+        174,
+        578,
+        0,
+        45
+       ]
+      ]
+     }
+    ],
+    "approved_date_user_choice": "개정문의 명시 날짜로 확정",
+    "arrival_estimate": false,
+    "raw_enforcement_date": "99991231",
+    "raw_promulgation_date": "19981002",
+    "rule": "individually approved explicit date of the amendment statement (user-amendment-explicit-dates-20261113)",
+    "source_path": "2200000104677.xml"
+   },
+   "enforcement_date": "1998-10-07",
+   "exposure_date": null,
+   "observed_metadata": {},
+   "promulgation_date": "1998-10-02",
+   "raw_enforcement_date": "99991231",
+   "raw_promulgation_date": "19981002",
+   "reason": "individually approved explicit date of the amendment statement (user-amendment-explicit-dates-20261113)",
+   "source_path": "2200000104677.xml",
+   "status": "confirmed"
+  }
+ },
+ "bin_p9r4_sources": {
+  "1063983": {
+   "manifest": "prototype-run:shard1-r25c3",
+   "manifest_sha256": "cefe517325debf44451d557e6c3efb94d06ee0acec070349833abd41e69f616a"
+  },
+  "2200000088451": {
+   "manifest": "prototype-run:base7-adm-rules-r25c3",
+   "manifest_sha256": "31aadeeeb058223764c70405cf34c45b6cc56886c15f8222167d2119403a1ee1"
+  },
+  "2200000104677": {
+   "manifest": "prototype-run:base7-adm-rules-r25c3",
+   "manifest_sha256": "31aadeeeb058223764c70405cf34c45b6cc56886c15f8222167d2119403a1ee1"
+  }
+ },
+ "cases": [
+  {
+   "basis": "delta 8 B3 last paragraph: the real source occurrence equals the bin-p9r4 output; oracle expects confirmed 2009-06-27",
+   "expect": {
+    "approval_applied": true,
+    "approval_not_applied": false,
+    "date_withheld": null,
+    "enforcement_date": "2009-06-27",
+    "reason": "individually approved explicit date of the amendment statement (user-amendment-explicit-dates-20261113)",
+    "status": "confirmed",
+    "text_derived": true
+   },
+   "id": "real-2200000088451",
+   "revision": "2200000088451"
+  },
+  {
+   "basis": "same; oracle expects confirmed 1998-10-07",
+   "expect": {
+    "approval_applied": true,
+    "approval_not_applied": false,
+    "date_withheld": null,
+    "enforcement_date": "1998-10-07",
+    "reason": "individually approved explicit date of the amendment statement (user-amendment-explicit-dates-20261113)",
+    "status": "confirmed",
+    "text_derived": true
+   },
+   "id": "real-2200000104677",
+   "revision": "2200000104677"
+  },
+  {
+   "basis": "delta 8 B2 last sentence: the heading on the same line stays inside the range; confirmed 2007-06-01",
+   "expect": {
+    "approval_applied": true,
+    "approval_not_applied": false,
+    "date_withheld": null,
+    "enforcement_date": "2007-06-01",
+    "reason": "individually approved addendum date before the source effective date (user-1063983-explicit-clause-date-20261113)",
+    "status": "confirmed",
+    "text_derived": true
+   },
+   "id": "real-1063983",
+   "revision": "1063983"
+  },
+  {
+   "basis": "delta 8 B1: hold, date_withheld added-detection-sentence, evidence kept; verdict probe A4",
+   "expect": {
+    "approval_applied": true,
+    "approval_not_applied": false,
+    "date_withheld": "added-detection-sentence",
+    "enforcement_date": null,
+    "reason": "effective date is unresolved; the effective-date sentence names no approved form",
+    "status": "unresolved"
+   },
+   "id": "b1-f2a-same-line-unread",
+   "revision": "2200000088451"
+  },
+  {
+   "basis": "delta 8 B1: hold, date_withheld added-detection-sentence, evidence kept; verdict probe A4",
+   "expect": {
+    "approval_applied": true,
+    "approval_not_applied": false,
+    "date_withheld": "added-detection-sentence",
+    "enforcement_date": null,
+    "reason": "effective date is unresolved; the effective-date sentence names no approved form",
+    "status": "unresolved"
+   },
+   "id": "b1-f2b-same-line-unread",
+   "revision": "2200000104677"
+  },
+  {
+   "basis": "delta 8 B1: hold, date_withheld added-detection-sentence, evidence kept; verdict probe C1",
+   "expect": {
+    "approval_applied": true,
+    "approval_not_applied": false,
+    "date_withheld": "added-detection-sentence",
+    "enforcement_date": null,
+    "reason": "effective date is unresolved; the effective-date sentence names no approved form",
+    "status": "unresolved"
+   },
+   "id": "b1-1063983-same-line-unread",
+   "revision": "1063983"
+  },
+  {
+   "basis": "delta 8 B2 symmetric control A2 (before)",
+   "expect": {
+    "approval_applied": true,
+    "approval_not_applied": false,
+    "blocked_note": "개정문내용: another read sentence in the section of the approved sentence",
+    "date_withheld": "approved-sentence-blocked",
+    "enforcement_date": null,
+    "reason": "effective date is unresolved; the effective-date sentence names no approved form",
+    "status": "unresolved"
+   },
+   "id": "b2-f2a-a2-other-date-before-no-heading",
+   "revision": "2200000088451"
+  },
+  {
+   "basis": "delta 8 B2 symmetric control A3 (after)",
+   "expect": {
+    "approval_applied": true,
+    "approval_not_applied": false,
+    "blocked_note": "개정문내용: another read sentence in the section of the approved sentence",
+    "date_withheld": "approved-sentence-blocked",
+    "enforcement_date": null,
+    "reason": "effective date is unresolved; the effective-date sentence names no approved form",
+    "status": "unresolved"
+   },
+   "id": "b2-f2a-a3-other-date-after-no-heading",
+   "revision": "2200000088451"
+  },
+  {
+   "basis": "delta 8 B2: a heading only after the sentence does not cut the box section; the other date after it is in range",
+   "expect": {
+    "approval_applied": true,
+    "approval_not_applied": false,
+    "blocked_note": "개정문내용: another read sentence in the section of the approved sentence",
+    "date_withheld": "approved-sentence-blocked",
+    "enforcement_date": null,
+    "reason": "effective date is unresolved; the effective-date sentence names no approved form",
+    "status": "unresolved"
+   },
+   "id": "b2-f2a-heading-only-after-sentence",
+   "revision": "2200000088451"
+  },
+  {
+   "basis": "delta 8 B2: the date in another box section (after) is out of range",
+   "expect": {
+    "approval_applied": true,
+    "approval_not_applied": false,
+    "date_withheld": null,
+    "enforcement_date": "2009-06-27",
+    "reason": "individually approved explicit date of the amendment statement (user-amendment-explicit-dates-20261113)",
+    "status": "confirmed"
+   },
+   "id": "b2-f2a-other-box-after",
+   "revision": "2200000088451"
+  },
+  {
+   "basis": "delta 8 B2: the date in another box section (before) is out of range",
+   "expect": {
+    "approval_applied": true,
+    "approval_not_applied": false,
+    "date_withheld": null,
+    "enforcement_date": "2009-06-27",
+    "reason": "individually approved explicit date of the amendment statement (user-amendment-explicit-dates-20261113)",
+    "status": "confirmed"
+   },
+   "id": "b2-f2a-other-box-before",
+   "revision": "2200000088451"
+  },
+  {
+   "basis": "delta 8 B2 first branch unchanged: a heading precedes the sentence; the date before the heading is out of range (verdict A1)",
+   "expect": {
+    "approval_applied": true,
+    "approval_not_applied": false,
+    "date_withheld": null,
+    "enforcement_date": "2009-06-27",
+    "reason": "individually approved explicit date of the amendment statement (user-amendment-explicit-dates-20261113)",
+    "status": "confirmed"
+   },
+   "id": "b2-f2a-other-date-before-heading",
+   "revision": "2200000088451"
+  },
+  {
+   "basis": "delta 8 B2 first branch unchanged: the date between the heading and the sentence is in range (verdict A1b)",
+   "expect": {
+    "approval_applied": true,
+    "approval_not_applied": false,
+    "blocked_note": "개정문내용: another read sentence in the section of the approved sentence",
+    "date_withheld": "approved-sentence-blocked",
+    "enforcement_date": null,
+    "reason": "effective date is unresolved; the effective-date sentence names no approved form",
+    "status": "unresolved"
+   },
+   "id": "b2-f2a-other-date-after-heading",
+   "revision": "2200000088451"
+  },
+  {
+   "basis": "delta 8 B2 symmetric control A2 (before)",
+   "expect": {
+    "approval_applied": true,
+    "approval_not_applied": false,
+    "blocked_note": "개정문내용: another read sentence in the section of the approved sentence",
+    "date_withheld": "approved-sentence-blocked",
+    "enforcement_date": null,
+    "reason": "effective date is unresolved; the effective-date sentence names no approved form",
+    "status": "unresolved"
+   },
+   "id": "b2-f2b-a2-other-date-before-no-heading",
+   "revision": "2200000104677"
+  },
+  {
+   "basis": "delta 8 B2 symmetric control A3 (after)",
+   "expect": {
+    "approval_applied": true,
+    "approval_not_applied": false,
+    "blocked_note": "개정문내용: another read sentence in the section of the approved sentence",
+    "date_withheld": "approved-sentence-blocked",
+    "enforcement_date": null,
+    "reason": "effective date is unresolved; the effective-date sentence names no approved form",
+    "status": "unresolved"
+   },
+   "id": "b2-f2b-a3-other-date-after-no-heading",
+   "revision": "2200000104677"
+  },
+  {
+   "basis": "delta 8 B2: a heading only after the sentence does not cut the box section; the other date after it is in range",
+   "expect": {
+    "approval_applied": true,
+    "approval_not_applied": false,
+    "blocked_note": "개정문내용: another read sentence in the section of the approved sentence",
+    "date_withheld": "approved-sentence-blocked",
+    "enforcement_date": null,
+    "reason": "effective date is unresolved; the effective-date sentence names no approved form",
+    "status": "unresolved"
+   },
+   "id": "b2-f2b-heading-only-after-sentence",
+   "revision": "2200000104677"
+  },
+  {
+   "basis": "delta 8 B2: the date in another box section (after) is out of range",
+   "expect": {
+    "approval_applied": true,
+    "approval_not_applied": false,
+    "date_withheld": null,
+    "enforcement_date": "1998-10-07",
+    "reason": "individually approved explicit date of the amendment statement (user-amendment-explicit-dates-20261113)",
+    "status": "confirmed"
+   },
+   "id": "b2-f2b-other-box-after",
+   "revision": "2200000104677"
+  },
+  {
+   "basis": "delta 8 B2: the date in another box section (before) is out of range",
+   "expect": {
+    "approval_applied": true,
+    "approval_not_applied": false,
+    "date_withheld": null,
+    "enforcement_date": "1998-10-07",
+    "reason": "individually approved explicit date of the amendment statement (user-amendment-explicit-dates-20261113)",
+    "status": "confirmed"
+   },
+   "id": "b2-f2b-other-box-before",
+   "revision": "2200000104677"
+  },
+  {
+   "basis": "delta 8 B2 first branch unchanged: a heading precedes the sentence; the date before the heading is out of range (verdict A1)",
+   "expect": {
+    "approval_applied": true,
+    "approval_not_applied": false,
+    "date_withheld": null,
+    "enforcement_date": "1998-10-07",
+    "reason": "individually approved explicit date of the amendment statement (user-amendment-explicit-dates-20261113)",
+    "status": "confirmed"
+   },
+   "id": "b2-f2b-other-date-before-heading",
+   "revision": "2200000104677"
+  },
+  {
+   "basis": "delta 8 B2 first branch unchanged: the date between the heading and the sentence is in range (verdict A1b)",
+   "expect": {
+    "approval_applied": true,
+    "approval_not_applied": false,
+    "blocked_note": "개정문내용: another read sentence in the section of the approved sentence",
+    "date_withheld": "approved-sentence-blocked",
+    "enforcement_date": null,
+    "reason": "effective date is unresolved; the effective-date sentence names no approved form",
+    "status": "unresolved"
+   },
+   "id": "b2-f2b-other-date-after-heading",
+   "revision": "2200000104677"
+  },
+  {
+   "basis": "delta 8 B3 control verdict B1, an addendum promulgation-day sentence: the chain result (unresolved, reason, keys) is kept; only approval_not_applied is added",
+   "expect": {
+    "approval_applied": false,
+    "approval_not_applied": true,
+    "date_withheld": null,
+    "enforcement_date": null,
+    "expected": {
+     "date": "2009-04-10",
+     "path": "P8",
+     "status": "estimated"
+    },
+    "exposure_date": "2009-04-10",
+    "observed": {
+     "date": null,
+     "path": null,
+     "status": "unresolved"
+    },
+    "reason": "effective date is unresolved; no approved source rule selects a date",
+    "status": "unresolved"
+   },
+   "id": "b3-b1-f2a",
+   "revision": "2200000088451"
+  },
+  {
+   "basis": "delta 8 B3 control verdict B2, an addendum proviso: the chain result (unresolved, reason, keys) is kept; only approval_not_applied is added",
+   "expect": {
+    "approval_applied": false,
+    "approval_not_applied": true,
+    "date_withheld": null,
+    "enforcement_date": null,
+    "expected": {
+     "date": "2009-04-10",
+     "path": "P8",
+     "status": "estimated"
+    },
+    "exposure_date": "2009-04-10",
+    "observed": {
+     "date": null,
+     "path": null,
+     "status": "unresolved"
+    },
+    "proviso_after_effective_sentence": true,
+    "reason": "effective date is unresolved; no approved source rule selects a date",
+    "status": "unresolved"
+   },
+   "id": "b3-b2-f2a",
+   "revision": "2200000088451"
+  },
+  {
+   "basis": "delta 8 B3 control verdict B3, an addendum other date: the chain result (unresolved, reason, keys) is kept; only approval_not_applied is added",
+   "expect": {
+    "approval_applied": false,
+    "approval_not_applied": true,
+    "date_withheld": null,
+    "enforcement_date": null,
+    "expected": {
+     "date": "2009-04-10",
+     "path": "P8",
+     "status": "estimated"
+    },
+    "exposure_date": "2009-04-10",
+    "observed": {
+     "date": null,
+     "path": null,
+     "status": "unresolved"
+    },
+    "reason": "effective date is unresolved; no approved source rule selects a date",
+    "status": "unresolved"
+   },
+   "id": "b3-b3-f2a",
+   "revision": "2200000088451"
+  },
+  {
+   "basis": "delta 8 B3 control B5: the body clause result stays; date_withheld absent; only approval_not_applied is added",
+   "expect": {
+    "approval_applied": false,
+    "approval_not_applied": true,
+    "date_withheld": null,
+    "enforcement_date": "2009-07-01",
+    "expected": {
+     "date": "2009-04-10",
+     "path": "P8",
+     "status": "estimated"
+    },
+    "observed": {
+     "date": "2009-07-01",
+     "path": "P5",
+     "status": "confirmed"
+    },
+    "reason": "approved clause in source body",
+    "status": "confirmed"
+   },
+   "id": "b3-b5-f2a",
+   "revision": "2200000088451"
+  },
+  {
+   "basis": "delta 8 B3 control verdict B1, an addendum promulgation-day sentence: the chain result (unresolved, reason, keys) is kept; only approval_not_applied is added",
+   "expect": {
+    "approval_applied": false,
+    "approval_not_applied": true,
+    "date_withheld": null,
+    "enforcement_date": null,
+    "expected": {
+     "date": "1998-10-02",
+     "path": "P8",
+     "status": "estimated"
+    },
+    "exposure_date": "1998-10-02",
+    "observed": {
+     "date": null,
+     "path": null,
+     "status": "unresolved"
+    },
+    "reason": "effective date is unresolved; no approved source rule selects a date",
+    "status": "unresolved"
+   },
+   "id": "b3-b1-f2b",
+   "revision": "2200000104677"
+  },
+  {
+   "basis": "delta 8 B3 control verdict B2, an addendum proviso: the chain result (unresolved, reason, keys) is kept; only approval_not_applied is added",
+   "expect": {
+    "approval_applied": false,
+    "approval_not_applied": true,
+    "date_withheld": null,
+    "enforcement_date": null,
+    "expected": {
+     "date": "1998-10-02",
+     "path": "P8",
+     "status": "estimated"
+    },
+    "exposure_date": "1998-10-02",
+    "observed": {
+     "date": null,
+     "path": null,
+     "status": "unresolved"
+    },
+    "proviso_after_effective_sentence": true,
+    "reason": "effective date is unresolved; no approved source rule selects a date",
+    "status": "unresolved"
+   },
+   "id": "b3-b2-f2b",
+   "revision": "2200000104677"
+  },
+  {
+   "basis": "delta 8 B3 control verdict B3, an addendum other date: the chain result (unresolved, reason, keys) is kept; only approval_not_applied is added",
+   "expect": {
+    "approval_applied": false,
+    "approval_not_applied": true,
+    "date_withheld": null,
+    "enforcement_date": null,
+    "expected": {
+     "date": "1998-10-02",
+     "path": "P8",
+     "status": "estimated"
+    },
+    "exposure_date": "1998-10-02",
+    "observed": {
+     "date": null,
+     "path": null,
+     "status": "unresolved"
+    },
+    "reason": "effective date is unresolved; no approved source rule selects a date",
+    "status": "unresolved"
+   },
+   "id": "b3-b3-f2b",
+   "revision": "2200000104677"
+  },
+  {
+   "basis": "delta 8 B3 control B5: the body clause result stays; date_withheld absent; only approval_not_applied is added",
+   "expect": {
+    "approval_applied": false,
+    "approval_not_applied": true,
+    "date_withheld": null,
+    "enforcement_date": "1998-11-01",
+    "expected": {
+     "date": "1998-10-02",
+     "path": "P8",
+     "status": "estimated"
+    },
+    "observed": {
+     "date": "1998-11-01",
+     "path": "P5",
+     "status": "confirmed"
+    },
+    "reason": "approved clause in source body",
+    "status": "confirmed"
+   },
+   "id": "b3-b5-f2b",
+   "revision": "2200000104677"
+  },
+  {
+   "basis": "delta 5 and 8 B3: a readable other date in 제개정이유내용 is neither unread nor new evidence; the approval applies",
+   "expect": {
+    "approval_applied": true,
+    "approval_not_applied": false,
+    "date_withheld": null,
+    "enforcement_date": "2009-06-27",
+    "reason": "individually approved explicit date of the amendment statement (user-amendment-explicit-dates-20261113)",
+    "status": "confirmed"
+   },
+   "id": "d-f2a-amendment-text-other-date",
+   "revision": "2200000088451"
+  },
+  {
+   "basis": "delta 5 and 8 B3: a readable other date in the outside text (항내용) is neither unread nor new evidence; the approval applies",
+   "expect": {
+    "approval_applied": true,
+    "approval_not_applied": false,
+    "date_withheld": null,
+    "enforcement_date": "2009-06-27",
+    "reason": "individually approved explicit date of the amendment statement (user-amendment-explicit-dates-20261113)",
+    "status": "confirmed"
+   },
+   "id": "d-f2a-outside-other-date",
+   "revision": "2200000088451"
+  },
+  {
+   "basis": "delta 8 B3: the 2005 section proviso is out of range; applies (verdict C2: confirmed 2007-06-01)",
+   "expect": {
+    "approval_applied": true,
+    "approval_not_applied": false,
+    "date_withheld": null,
+    "enforcement_date": "2007-06-01",
+    "reason": "individually approved addendum date before the source effective date (user-1063983-explicit-clause-date-20261113)",
+    "status": "confirmed"
+   },
+   "id": "d-1063983-proviso-in-2005-section",
+   "revision": "1063983"
+  },
+  {
+   "basis": "verdict C3: an unread sentence is a hold signal wherever it is (added-detection-sentence)",
+   "expect": {
+    "approval_applied": true,
+    "approval_not_applied": false,
+    "date_withheld": "added-detection-sentence",
+    "enforcement_date": null,
+    "reason": "effective date is unresolved; the effective-date sentence names no approved form",
+    "status": "unresolved"
+   },
+   "id": "d-1063983-unread-in-2005-section",
+   "revision": "1063983"
+  },
+  {
+   "basis": "verdict C4: another date in the section of the approved sentence of the amendment text is blocked",
+   "expect": {
+    "approval_applied": true,
+    "approval_not_applied": false,
+    "date_withheld": "approved-sentence-blocked",
+    "enforcement_date": null,
+    "reason": "effective date is unresolved; the effective-date sentence names no approved form",
+    "status": "unresolved"
+   },
+   "id": "d-1063983-other-date-after-sentence-amendment",
+   "revision": "1063983"
+  }
+ ],
+ "date_withheld_priority": [
+  {
+   "approval_blocked": false,
+   "approval_mismatch": false,
+   "date_withheld": "added-detection-sentence",
+   "provenance_error": false
+  },
+  {
+   "approval_blocked": true,
+   "approval_mismatch": false,
+   "date_withheld": "approved-sentence-blocked",
+   "provenance_error": false
+  },
+  {
+   "approval_blocked": false,
+   "approval_mismatch": true,
+   "date_withheld": "approved-copy-mismatch",
+   "provenance_error": false
+  },
+  {
+   "approval_blocked": true,
+   "approval_mismatch": true,
+   "date_withheld": "approved-copy-mismatch",
+   "provenance_error": false
+  },
+  {
+   "approval_blocked": false,
+   "approval_mismatch": false,
+   "date_withheld": "source-provenance-error",
+   "provenance_error": true
+  },
+  {
+   "approval_blocked": true,
+   "approval_mismatch": false,
+   "date_withheld": "source-provenance-error",
+   "provenance_error": true
+  },
+  {
+   "approval_blocked": false,
+   "approval_mismatch": true,
+   "date_withheld": "source-provenance-error",
+   "provenance_error": true
+  },
+  {
+   "approval_blocked": true,
+   "approval_mismatch": true,
+   "date_withheld": "source-provenance-error",
+   "provenance_error": true
+  }
+ ],
+ "decisions": {
+  "1063983": "user-1063983-explicit-clause-date-20261113",
+  "f2": "user-amendment-explicit-dates-20261113"
+ },
+ "k5": {
+  "gate_exempt": false,
+  "gate_runs": true,
+  "method": "text_derived true; the gate computes its marks (GATE_REPORT has a row); forcing both marks true makes the gate withhold",
+  "text_derived": true
+ },
+ "purpose": "expected values of the r25c approval-path tests, fixed before the test code (task i1)",
+ "sentence_utf8_bytes": {
+  "1063983": 51,
+  "2200000088451": 46,
+  "2200000104677": 45
+ }
+}

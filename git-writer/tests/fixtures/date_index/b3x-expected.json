@@ -1,0 +1,101 @@
+{
+ "cases": [
+  {
+   "basis": "B3 second control: heading line before the addendum sentence of b3-b1-f2a; the chain result is that of b3-b1-f2a, only approval_not_applied is added",
+   "expect": {
+    "approval_applied": false,
+    "approval_not_applied": true,
+    "date_withheld": null,
+    "enforcement_date": null,
+    "expected": {
+     "date": "2009-04-10",
+     "path": "P8",
+     "status": "estimated"
+    },
+    "exposure_date": "2009-04-10",
+    "observed": {
+     "date": null,
+     "path": null,
+     "status": "unresolved"
+    },
+    "reason": "effective date is unresolved; no approved source rule selects a date",
+    "status": "unresolved"
+   },
+   "id": "b3x-b6-f2a",
+   "revision": "2200000088451"
+  },
+  {
+   "basis": "B3 second control: heading line before the addendum sentence of b3-b1-f2b; the chain result is that of b3-b1-f2b, only approval_not_applied is added",
+   "expect": {
+    "approval_applied": false,
+    "approval_not_applied": true,
+    "date_withheld": null,
+    "enforcement_date": null,
+    "expected": {
+     "date": "1998-10-02",
+     "path": "P8",
+     "status": "estimated"
+    },
+    "exposure_date": "1998-10-02",
+    "observed": {
+     "date": null,
+     "path": null,
+     "status": "unresolved"
+    },
+    "reason": "effective date is unresolved; no approved source rule selects a date",
+    "status": "unresolved"
+   },
+   "id": "b3x-b6-f2b",
+   "revision": "2200000104677"
+  },
+  {
+   "basis": "B3 second control: heading line before the addendum sentence of b3-b3-f2a; the chain result is that of b3-b3-f2a, only approval_not_applied is added",
+   "expect": {
+    "approval_applied": false,
+    "approval_not_applied": true,
+    "date_withheld": null,
+    "enforcement_date": null,
+    "expected": {
+     "date": "2009-04-10",
+     "path": "P8",
+     "status": "estimated"
+    },
+    "exposure_date": "2009-04-10",
+    "observed": {
+     "date": null,
+     "path": null,
+     "status": "unresolved"
+    },
+    "reason": "effective date is unresolved; no approved source rule selects a date",
+    "status": "unresolved"
+   },
+   "id": "b3x-b7-f2a",
+   "revision": "2200000088451"
+  },
+  {
+   "basis": "B3 second control: heading line before the addendum sentence of b3-b3-f2b; the chain result is that of b3-b3-f2b, only approval_not_applied is added",
+   "expect": {
+    "approval_applied": false,
+    "approval_not_applied": true,
+    "date_withheld": null,
+    "enforcement_date": null,
+    "expected": {
+     "date": "1998-10-02",
+     "path": "P8",
+     "status": "estimated"
+    },
+    "exposure_date": "1998-10-02",
+    "observed": {
+     "date": null,
+     "path": null,
+     "status": "unresolved"
+    },
+    "reason": "effective date is unresolved; no approved source rule selects a date",
+    "status": "unresolved"
+   },
+   "id": "b3x-b7-f2b",
+   "revision": "2200000104677"
+  }
+ ],
+ "purpose": "B3 second control (N7 of the final execution verification, ledger line 763 m3): F2a and F2b inputs whose rule chain result differs from the registration, built with a heading line before the addendum sentence. The expected values are those of b3-b1 and b3-b3 of i1-expected.json (same sentence, same chain result). Fixed before the cases of approval_tests."
+}
