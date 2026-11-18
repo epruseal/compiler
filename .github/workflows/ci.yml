@@ -21,6 +21,7 @@ jobs:
           # new SHA in a follow-up PR. Do not move this back to a moving ref.
           ref: 00d3f38e4058c452d2e0f1a4bb0e8ca3e3003773
           persist-credentials: false
+      - run: python3 -m unittest discover tools/llm-date-judgment/tests
       - run: python3 -m pip install -r legalize-pipeline/requirements.txt
       - run: >
           PYTHONPATH=legalize-pipeline python3 -m precedents.dump_oracle

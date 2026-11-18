@@ -1,0 +1,408 @@
+{
+ "decision": "lead-user-decision-protection-20261116",
+ "key": "dataset and revision select a protected revision; a copy whose source_sha256 is not listed is not protected automatically and goes to the user-confirmation queue (protected_source_changed)",
+ "recorded": "2026-11-16",
+ "revisions": [
+  {
+   "copies": [
+    {
+     "path": "admrule/2200000088451.xml",
+     "source_sha256": "9f137cda5dbf9672d4f736830bf94d73a14d8726b035b72c5c008fec120da000"
+    }
+   ],
+   "dataset": "admrules",
+   "decision_id": "user-amendment-explicit-dates-20261113",
+   "expected": {
+    "enforcement_date": "2009-06-27",
+    "repeal": false,
+    "status": "confirmed"
+   },
+   "expected_source": "compiler#1 r25c3 parser result",
+   "identity": "2111925",
+   "record_result": "20090627",
+   "revision": "2200000088451",
+   "source": "approval registry; user-amendment-explicit-dates-20261113 (comment 6841451678)"
+  },
+  {
+   "copies": [
+    {
+     "path": "admrule/2200000097543.xml",
+     "source_sha256": "6a5930e48af5762c9842cc4e9248a7267674bc8dd5613b35c30cca3a9dfa7a76"
+    }
+   ],
+   "dataset": "admrules",
+   "decision_id": "id 없음(2026-10-26 사용자 선택 \"부칙처럼 해석\")",
+   "expected": {
+    "enforcement_date": "1995-08-25",
+    "repeal": false,
+    "status": "confirmed"
+   },
+   "expected_source": "compiler#1 r25c3 parser result",
+   "identity": "2113017",
+   "record_result": "19950825",
+   "revision": "2200000097543",
+   "source": "issue body item: user selection (2026-10-26) \"부칙처럼 해석\" names this example and its sentence 본 지침은 1995년 8월 25일부터 시행한다 fixes one date under the chosen option"
+  },
+  {
+   "copies": [
+    {
+     "path": "admrule/2200000104677.xml",
+     "source_sha256": "cbdf15bfb3871c1fa4df83335dce1bd647efe9325331cc6f93776a67ef44a86b"
+    }
+   ],
+   "dataset": "admrules",
+   "decision_id": "user-amendment-explicit-dates-20261113",
+   "expected": {
+    "enforcement_date": "1998-10-07",
+    "repeal": false,
+    "status": "confirmed"
+   },
+   "expected_source": "compiler#1 r25c3 parser result",
+   "identity": "2113631",
+   "record_result": "19981007",
+   "revision": "2200000104677",
+   "source": "approval registry; user-amendment-explicit-dates-20261113 (comment 6841451678)"
+  },
+  {
+   "copies": [
+    {
+     "path": "ordinance/496220.xml",
+     "source_sha256": "062d991c63620559f26aaf449039755ccc199207e7d7ac57bc05d928b5d94540"
+    }
+   ],
+   "dataset": "ordinances",
+   "decision_id": "id 없음(2026-10-26 사용자 선택 \"시행일로 재생, 정렬은 다음 키로\")",
+   "expected": {
+    "enforcement_date": "1999-01-01",
+    "repeal": false,
+    "status": "confirmed"
+   },
+   "expected_source": "compiler#1 r25c3 parser result",
+   "identity": "215428",
+   "record_result": "19990101 (valid source effective date, replayed on it)",
+   "revision": "496220",
+   "source": "issue body item: example of the broken promulgation date question; user selection \"시행일로 재생, 정렬은 다음 키로\" fixes the result"
+  },
+  {
+   "copies": [
+    {
+     "path": "ordinance/509050.xml",
+     "source_sha256": "694e12b61a3f3b47c11408d719f133b113e00eeb0b0fcc264bf1a20b9b39fa9c"
+    }
+   ],
+   "dataset": "ordinances",
+   "decision_id": "user-repeal-and-enact-as-enactment-20261103",
+   "expected": {
+    "enforcement_date": "1999-01-28",
+    "repeal": false,
+    "status": "confirmed"
+   },
+   "expected_source": "record (r14 measured)",
+   "identity": "216550",
+   "record_result": "enactment, not repeal",
+   "revision": "509050",
+   "source": "comment 6620840356 user decision 3 names the result (repeal-and-enact with articles is an enactment)"
+  },
+  {
+   "copies": [
+    {
+     "path": "ordinance/806099.xml",
+     "source_sha256": "d74ae59c08b754b0d90b192d41b99b10bfa534a62a0c06b16c6124d7bc7425ab"
+    }
+   ],
+   "dataset": "ordinances",
+   "decision_id": "single-label-date-priority-20261103",
+   "expected": {
+    "enforcement_date": "2008-03-21",
+    "repeal": false,
+    "status": "confirmed"
+   },
+   "expected_source": "compiler#1 r25c3 parser result",
+   "identity": "2051557",
+   "record_result": "20080321",
+   "revision": "806099",
+   "source": "comment 6593104875 (user decision lists the result)"
+  },
+  {
+   "copies": [
+    {
+     "path": "ordinance/847263.xml",
+     "source_sha256": "87a986bca5decbfde3c3e35550036ac91036447fee9d7dc6b80a2d553fcf078b"
+    }
+   ],
+   "dataset": "ordinances",
+   "decision_id": "single-label-date-priority-20261103",
+   "expected": {
+    "enforcement_date": "2006-06-28",
+    "repeal": false,
+    "status": "confirmed"
+   },
+   "expected_source": "compiler#1 r25c3 parser result",
+   "identity": "2035183",
+   "record_result": "20060628",
+   "revision": "847263",
+   "source": "comment 6593104875 (user decision lists the result)"
+  },
+  {
+   "copies": [
+    {
+     "path": "ordinance/873698.xml",
+     "source_sha256": "38ba007fa06342dcf23528dcd4bfa660ea35056c765f9696f3d86e4640fc34a1"
+    }
+   ],
+   "dataset": "ordinances",
+   "decision_id": "user-explicit-date-kept-20261104",
+   "expected": {
+    "enforcement_date": "1999-01-01",
+    "repeal": false,
+    "status": "confirmed"
+   },
+   "expected_source": "compiler#1 r25c3 parser result",
+   "identity": "2101695",
+   "record_result": "19990101",
+   "revision": "873698",
+   "source": "user-explicit-date-kept-20261104 (comment 6623245364), comments 6624108041 and 6731875583"
+  },
+  {
+   "copies": [
+    {
+     "path": "ordinance/879919.xml",
+     "source_sha256": "ad6176093189f7679e46dda306a1bf16ede1be64de8691c42e4fe26a704b0f1c"
+    }
+   ],
+   "dataset": "ordinances",
+   "decision_id": "user-879919-twenty-day-kept-20261104",
+   "expected": {
+    "enforcement_date": "2011-08-03",
+    "repeal": false,
+    "status": "confirmed"
+   },
+   "expected_source": "compiler#1 r25c3 parser result",
+   "identity": "2114490",
+   "record_result": "keep current behaviour (21-day default)",
+   "revision": "879919",
+   "source": "user-879919-twenty-day-kept-20261104 (comment 6624108041 item 5)"
+  },
+  {
+   "copies": [
+    {
+     "path": "ordinance/931559.xml",
+     "source_sha256": "4cc5de230c1097585e9254787b975c6883503bf24f2aa97caa03cb564425cfdb"
+    }
+   ],
+   "dataset": "ordinances",
+   "decision_id": "id 없음(2026-10-26 사용자 선택 \"본문 시행 문구 우선\")",
+   "expected": {
+    "enforcement_date": "1989-07-24",
+    "repeal": false,
+    "status": "confirmed"
+   },
+   "expected_source": "compiler#1 r25c3 parser result",
+   "identity": "2137290",
+   "record_result": "promulgation day (body clause first)",
+   "revision": "931559",
+   "source": "issue body item: the chosen option \"본문 시행 문구 우선\" gives the promulgation day for this example"
+  },
+  {
+   "copies": [
+    {
+     "path": "ordinance/1000238.xml",
+     "source_sha256": "afb78610ea6188d80dfc0676967c10627fd8cf1b685bea1c9011986909cbe9e7"
+    }
+   ],
+   "dataset": "ordinances",
+   "decision_id": "id 없음(2026-10-27 사용자 결정, 댓글 6437632923)",
+   "expected": {
+    "enforcement_date": "2007-12-01",
+    "repeal": false,
+    "status": "confirmed"
+   },
+   "expected_source": "compiler#1 r25c3 parser result",
+   "identity": "2061492",
+   "record_result": "20071201",
+   "revision": "1000238",
+   "source": "approval registry; comment 6437632923 (user decision, one-month calculation)"
+  },
+  {
+   "copies": [
+    {
+     "path": "ordinance/1006223.xml",
+     "source_sha256": "29a60fa8f4c4b7424c9445d202a4209dcc5c9bba3e990e27800dfdf059030b41"
+    }
+   ],
+   "dataset": "ordinances",
+   "decision_id": "single-label-date-priority-20261103(2026-10-27 사용자 정정 포함)",
+   "expected": {
+    "enforcement_date": "2002-08-21",
+    "repeal": false,
+    "status": "confirmed"
+   },
+   "expected_source": "compiler#1 r25c3 parser result",
+   "identity": "2058838",
+   "record_result": "20020821",
+   "revision": "1006223",
+   "source": "comment 6437566094 (2026-10-27 user correction), comment 6593104875 (user decision lists the result)"
+  },
+  {
+   "copies": [
+    {
+     "path": "ordinance/1011016.xml",
+     "source_sha256": "7760d364c7306090bfd9f376b0125c753c2148601d4f7b02b3f8e153f36994fb"
+    }
+   ],
+   "dataset": "ordinances",
+   "decision_id": "id 없음(2026-10-26 사용자 선택 \"적힌 날짜 그대로\", compiler#1 본문)",
+   "expected": {
+    "enforcement_date": "2011-01-01",
+    "repeal": false,
+    "status": "confirmed"
+   },
+   "expected_source": "compiler#1 r25c3 parser result",
+   "identity": "2231075",
+   "record_result": "20110101",
+   "revision": "1011016",
+   "source": "approval registry; issue body (explicit date earlier than promulgation kept as written), comment 6571062276"
+  },
+  {
+   "copies": [
+    {
+     "path": "ordinance/1018380.xml",
+     "source_sha256": "8a2bf8194e020b910d494593caee024dafa4b04fcaca858d614c3aa5947cae63"
+    }
+   ],
+   "dataset": "ordinances",
+   "decision_id": "user-explicit-date-kept-20261104",
+   "expected": {
+    "enforcement_date": "2010-01-01",
+    "repeal": false,
+    "status": "confirmed"
+   },
+   "expected_source": "compiler#1 r25c3 parser result",
+   "identity": "2066923",
+   "record_result": "20100101",
+   "revision": "1018380",
+   "source": "user-explicit-date-kept-20261104 (comment 6623245364 names the result that the chosen option keeps)"
+  },
+  {
+   "copies": [
+    {
+     "path": "ordinance/1025947.xml",
+     "source_sha256": "1de8f2b0086bc80cc95a7b3876db8e538e5a2583190c26dc66284c6c14ddb79c"
+    }
+   ],
+   "dataset": "ordinances",
+   "decision_id": "user-proviso-scope-enforcement-sentence-20261103",
+   "expected": {
+    "enforcement_date": "2011-01-01",
+    "repeal": false,
+    "status": "confirmed"
+   },
+   "expected_source": "compiler#1 r25c3 parser result",
+   "identity": "2100419",
+   "record_result": "20110101",
+   "revision": "1025947",
+   "source": "enforcement-date-exceptions.md E-CASES: the sentence gives 2011-01-01 and names user-proviso-scope-enforcement-sentence-20261103"
+  },
+  {
+   "copies": [
+    {
+     "path": "ordinance/1063983.xml",
+     "source_sha256": "ae1e94de4de982f86254e24737d2b729171d3dad1b0c7d46d5433885374ba265"
+    }
+   ],
+   "dataset": "ordinances",
+   "decision_id": "user-1063983-explicit-clause-date-20261113",
+   "expected": {
+    "enforcement_date": "2007-06-01",
+    "repeal": false,
+    "status": "confirmed"
+   },
+   "expected_source": "compiler#1 r25c3 parser result",
+   "identity": "2153239",
+   "record_result": "20070601",
+   "revision": "1063983",
+   "source": "approval registry; user-1063983-explicit-clause-date-20261113 (comment 6841521863)"
+  },
+  {
+   "copies": [
+    {
+     "path": "ordinance/1079521.xml",
+     "source_sha256": "07792bcc3788a21235781ddb5176354932b4340238e1ab75b0d97e6133256ca7"
+    }
+   ],
+   "dataset": "ordinances",
+   "decision_id": "id 없음(2026-10-27 사용자 확인, 댓글 6437602564)",
+   "expected": {
+    "enforcement_date": "1999-12-31",
+    "repeal": false,
+    "status": "confirmed"
+   },
+   "expected_source": "compiler#1 r25c3 parser result",
+   "identity": "2140475",
+   "record_result": "19991231",
+   "revision": "1079521",
+   "source": "comment 6437602564 (2026-10-27 user confirmation), comment 6571062276"
+  },
+  {
+   "copies": [
+    {
+     "path": "ordinance/1081693.xml",
+     "source_sha256": "e8b86db540c13872c090984d657b708ab0af486009ea0063bda0814f698a94c1"
+    }
+   ],
+   "dataset": "ordinances",
+   "decision_id": "id 없음(2026-10-27 사용자 확인, 댓글 6437602564)",
+   "expected": {
+    "enforcement_date": "2014-10-21",
+    "repeal": false,
+    "status": "confirmed"
+   },
+   "expected_source": "compiler#1 r25c3 parser result",
+   "identity": "2146631",
+   "record_result": "20141021",
+   "revision": "1081693",
+   "source": "comment 6437602564 (2026-10-27 user confirmation), comment 6571062276"
+  },
+  {
+   "copies": [
+    {
+     "path": "ordinance/2113963.xml",
+     "source_sha256": "8726f8f5d47567ce3e6cf6ea9d51b1527f244014e30177ebb223c3c27183f759"
+    }
+   ],
+   "dataset": "ordinances",
+   "decision_id": "user-explicit-date-without-buteo-20261104",
+   "expected": {
+    "enforcement_date": "1996-07-01",
+    "repeal": false,
+    "status": "confirmed"
+   },
+   "expected_source": "compiler#1 r25c3 parser result",
+   "identity": "2066962",
+   "record_result": "19960701",
+   "revision": "2113963",
+   "source": "user-explicit-date-without-buteo-20261104 (comment 6730055022 names the result)"
+  },
+  {
+   "copies": [
+    {
+     "path": "ordinance/2120871.xml",
+     "source_sha256": "8379414978dff7de32e61d3efa569a4877133d73d478ce8432317ab0ff53bd12"
+    }
+   ],
+   "dataset": "ordinances",
+   "decision_id": "user-repeal-and-enact-repeal-only-is-repeal-20261103",
+   "expected": {
+    "enforcement_date": "2026-04-10",
+    "repeal": true,
+    "status": null
+   },
+   "expected_source": "record (r14 measured)",
+   "identity": "2016638",
+   "record_result": "repealed from 2026-04-10",
+   "revision": "2120871",
+   "source": "comment 6620840356 user decision 3 names the result (user-repeal-and-enact-repeal-only-is-repeal-20261103)"
+  }
+ ],
+ "schema_version": 1
+}
