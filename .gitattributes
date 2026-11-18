@@ -1,0 +1,3 @@
+# Keep the exact bytes of fixtures that contain NUL.
+ordinances/tests/fixtures/nul-in-cdata.xml -text
+tools/llm-date-judgment/tests/fixtures/nul-in-cdata.xml -text

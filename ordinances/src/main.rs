@@ -7,7 +7,7 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context, Result};
 use clap::Parser;
 use git_writer::date_index::{
-    DatePlan, PATH_REVISION_PREFIX, SourceRevision, repeal_and_enact_is_repeal,
+    DatePlan, PATH_REVISION_PREFIX, SourceRevision, repeal_and_enact_is_repeal, without_nul,
 };
 use git_writer::llm_ledger::LlmLedger;
 use git_writer::{
@@ -350,7 +350,9 @@ fn content_signature(xml: &[u8]) -> Result<Vec<(String, String)>> {
             })
             .collect()
     };
-    let text = std::str::from_utf8(xml)?;
+    // `load_ordinance` already warned about NUL in this file.
+    let (xml, _) = without_nul(xml);
+    let text = std::str::from_utf8(&xml)?;
     let mut reader = Reader::from_str(text);
     reader.config_mut().trim_text(false);
     reader.config_mut().expand_empty_elements = true;
@@ -618,10 +620,18 @@ fn load_ordinance(path: &Path, fallback: &str) -> Result<(Vec<u8>, Ordinance)> {
         let message = format!("failed to read {}: {source}", path.display());
         anyhow::Error::new(source).context(message)
     })?;
-    let parsed = parse_ordinance(&raw, fallback).map_err(|source| {
+    // The raw bytes stay as they are; only the parser reads them without NUL.
+    let (stripped, removed) = without_nul(&raw);
+    let parsed = parse_ordinance(&stripped, fallback).map_err(|source| {
         let message = format!("failed to parse ordinance XML {}: {source}", path.display());
         source.context(message)
     })?;
+    if removed > 0 {
+        eprintln!(
+            "warning: removed {removed} NUL character(s) from {} before parsing",
+            path.display()
+        );
+    }
     Ok((raw, parsed))
 }
 
@@ -2475,6 +2485,59 @@ mod tests {
         let missing = load_ordinance(&temp.path().join("none.xml"), "none").unwrap_err();
         assert!(missing.to_string().starts_with("failed to read "));
         assert!(missing.chain().last().unwrap().is::<std::io::Error>());
+    }
+
+    /// The shared fixture with NUL in an article and in the amendment statement.
+    const NUL_FIXTURE: &str = concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/tests/fixtures/nul-in-cdata.xml"
+    );
+    const NUL_FIXTURE_SHA256: &str =
+        "9e22859f6e0ca79c00d77ec02b125e6db73374ed94df5fa25b2533bba5acd8e0";
+
+    #[test]
+    fn load_ordinance_keeps_the_raw_bytes_and_parses_without_nul() {
+        let file = fs::read(NUL_FIXTURE).unwrap();
+        assert_eq!(git_writer::date_index::sha256(&file), NUL_FIXTURE_SHA256);
+        assert_eq!(file.iter().filter(|byte| **byte == 0).count(), 3);
+
+        let (raw, ordinance) = load_ordinance(Path::new(NUL_FIXTURE), "nul").unwrap();
+        assert_eq!(raw, file);
+        let article = ordinance
+            .articles
+            .iter()
+            .find(|article| article.content.contains("목적으로 한다"))
+            .unwrap();
+        assert!(!article.content.contains('\0'), "{:?}", article.content);
+        assert!(!format!("{ordinance:?}").contains("\\0"), "{ordinance:?}");
+    }
+
+    #[test]
+    fn copy_difference_ignores_nul() {
+        let raw = fs::read(NUL_FIXTURE).unwrap();
+        let stripped: Vec<u8> = raw.iter().copied().filter(|byte| *byte != 0).collect();
+        assert_eq!(copy_difference(&raw, &stripped).unwrap(), None);
+    }
+
+    /// Control (passes before the fix too): NUL does not hide a broken tag.
+    #[test]
+    fn load_ordinance_with_nul_still_fails_on_a_broken_tag() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("bad.xml");
+        fs::write(&path, "<Ordin>\0<").unwrap();
+        let text = load_ordinance(&path, "bad").unwrap_err().to_string();
+        assert!(text.contains("failed to parse ordinance XML"), "{text}");
+    }
+
+    /// Control (passes before the fix too): a NUL-free source comes back unchanged.
+    #[test]
+    fn load_ordinance_keeps_nul_free_bytes() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("clean.xml");
+        let bytes = copy_xml("서울특별시", "제1조 목적", "", "20100101");
+        fs::write(&path, &bytes).unwrap();
+        let (raw, _) = load_ordinance(&path, "clean").unwrap();
+        assert_eq!(raw, bytes);
     }
 
     fn copy_xml(institution: &str, article: &str, extra: &str, effective: &str) -> Vec<u8> {
