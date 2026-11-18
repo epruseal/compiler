@@ -5,6 +5,7 @@ literally (&lt; &gt; &amp;) is decoded once, the same way the compiler decodes i
 """
 import hashlib
 import re
+import sys
 import xml.etree.ElementTree as ET
 from pathlib import Path
 
@@ -40,9 +41,22 @@ def iso(raw):
 ORD_KINDS = {'C0001': '조례', 'C0002': '규칙', 'C0003': '훈령', 'C0004': '예규', 'C0006': '기타', 'C0010': '고시', 'C0011': '의회규칙'}
 
 
+def without_nul(data):
+    """Return the bytes without NUL and the number of NUL removed. The cache keeps the raw bytes."""
+    count = data.count(b'\0')
+    return (data.replace(b'\0', b''), count) if count else (data, 0)
+
+
+def warn_removed_nul(count, source):
+    print(f'warning: removed {count} NUL character(s) from {source} before parsing', file=sys.stderr)
+
+
 def read_source(path, dataset):
     data = Path(path).read_bytes()
-    root = ET.fromstring(data)
+    parsed, removed = without_nul(data)
+    root = ET.fromstring(parsed)
+    if removed:
+        warn_removed_nul(removed, path)
     meta = {'dataset': dataset, 'source_sha256': hashlib.sha256(data).hexdigest(), 'source_bytes': len(data)}
     fields = {}
     addenda = []

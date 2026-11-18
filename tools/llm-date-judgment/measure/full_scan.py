@@ -82,13 +82,14 @@ def scan(job):
     path = os.path.join(folder, name)
     try:
         with open(path, 'rb') as fh:
+            # The head length check reads the raw bytes; only the decoded text drops NUL.
             head = fh.read(HEAD)
-            text = head.decode('utf-8', 'replace')
+            text = head.replace(b'\0', b'').decode('utf-8', 'replace')
             eff = first(text, '시행일자')
             if eff is None and len(head) == HEAD:
                 rest = fh.read()
                 head += rest
-                text = head.decode('utf-8', 'replace')
+                text = head.replace(b'\0', b'').decode('utf-8', 'replace')
                 eff = first(text, '시행일자')
     except OSError as error:
         return {'dataset': dataset, 'path': path, 'error': str(error)}
@@ -111,10 +112,12 @@ def scan(job):
     cls = classify(eff)
     row = {'dataset': dataset, 'path': path, 'name': name, 'prio': prio, 'serial': serial, 'identity': ident,
            'kind': kind, 'eff_raw': eff, 'eff_class': cls, 'prom_raw': prom, 'prom_class': classify(prom)}
+    decoded = head
     if cls != 'valid':
         with open(path, 'rb') as fh:
             data = fh.read()
-        full = data.decode('utf-8', 'replace')
+        decoded = data
+        full = data.replace(b'\0', b'').decode('utf-8', 'replace')
         row['sha256'] = hashlib.sha256(data).hexdigest()
         row['bytes'] = len(data)
         fields = {}
@@ -123,6 +126,9 @@ def scan(job):
         row['text_chars'] = fields
         row['text_blank'] = all(n == 0 for n in fields.values())
         row['html'] = full.lstrip().lower().startswith('<!doctype html') or '<html' in full[:500].lower()
+    removed = decoded.count(b'\0')
+    if removed:
+        print(f'warning: removed {removed} NUL character(s) from {path} before parsing', file=sys.stderr)
     return row
 
 

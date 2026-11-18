@@ -184,6 +184,19 @@ pub fn sha256(bytes: &[u8]) -> String {
     format!("{:x}", Sha256::digest(bytes))
 }
 
+/// Returns the source bytes without NUL (U+0000) and the number of NUL removed.
+///
+/// The source cache keeps the raw bytes, and hashes use them. Only parsing reads these bytes.
+/// Without NUL the input comes back borrowed with a count of 0. The function prints nothing.
+pub fn without_nul(xml: &[u8]) -> (std::borrow::Cow<'_, [u8]>, usize) {
+    let count = xml.iter().filter(|byte| **byte == 0).count();
+    if count == 0 {
+        return (std::borrow::Cow::Borrowed(xml), 0);
+    }
+    let kept = xml.iter().copied().filter(|byte| *byte != 0).collect();
+    (std::borrow::Cow::Owned(kept), count)
+}
+
 /// Builds a date. The one place that fixes the valid range: years 0001 to 9999 and a real
 /// calendar day, the range of the consumer's `date.fromisoformat`. Every code path that
 /// creates a date from text uses it, so a year such as 0000 never reaches an index.
@@ -261,7 +274,8 @@ fn date_text(xml: &[u8]) -> Result<DateText> {
 /// `date_text` that collects the SourceView only when `collect` is set or the diagnostic trace is
 /// on. Without it the view stays empty; only the gate and the approvals with a gate policy read it.
 fn date_text_with(xml: &[u8], collect: bool) -> Result<DateText> {
-    let mut reader = Reader::from_reader(xml);
+    let (xml, _) = without_nul(xml);
+    let mut reader = Reader::from_reader(xml.as_ref());
     let mut stack: Vec<String> = Vec::new();
     let mut addenda = Vec::new();
     let mut current: Option<Addendum> = None;
@@ -3751,7 +3765,8 @@ fn compare_label<T: PartialEq>(found: &[T], expected: Option<&T>) -> Match {
 
 /// Reads the original promulgation number from the source metadata.
 fn promulgation_number(xml: &[u8]) -> Option<u64> {
-    let text = String::from_utf8_lossy(xml);
+    let (xml, _) = without_nul(xml);
+    let text = String::from_utf8_lossy(&xml);
     static NUMBER: LazyLock<Regex> = LazyLock::new(|| {
         Regex::new(r"<공포번호>\s*(?:<!\[CDATA\[\s*)?(\d+)").expect("valid number pattern")
     });
@@ -5645,8 +5660,17 @@ fn resolve_source(
     source: &SourceRevision,
     llm: Option<&crate::llm_ledger::LlmLedger>,
 ) -> Result<Occurrence> {
-    resolve_rules_with(dataset, source, true, llm)
-        .with_context(|| format!("failed to resolve source dates {}", source.source_path))
+    let occurrence = resolve_rules_with(dataset, source, true, llm)
+        .with_context(|| format!("failed to resolve source dates {}", source.source_path))?;
+    // The date rules read the source without NUL (`date_text_with`, `promulgation_number`).
+    let (_, removed) = without_nul(&source.xml);
+    if removed > 0 {
+        eprintln!(
+            "warning: removed {removed} NUL character(s) from {dataset} {} {} before parsing",
+            source.identity, source.revision
+        );
+    }
+    Ok(occurrence)
 }
 
 /// The rules and the gate of one source, without the processing of a plan. Tests use it.
@@ -21457,5 +21481,48 @@ mod llm_tests {
         }
         assert!(message("llm", "r").starts_with("조례: test (LLM 판단)\n"));
         assert!(message("estimated", "r").starts_with("조례: test (추정)\n"));
+    }
+}
+
+#[cfg(test)]
+mod nul_tests {
+    use super::*;
+
+    /// Source XML with NUL in an article, an addendum and the amendment statement.
+    const NUL_XML: &str = "<LawService><조문><조><조내용><![CDATA[제1조(목적) 이 조례는\u{0} 목적으로 한다.]]></조내용></조></조문><부칙><부칙내용><![CDATA[이 조례는 공포한 날부터 시\u{0}행한다.]]></부칙내용></부칙><개정문><개정문내용><![CDATA[개정\u{0}문]]></개정문내용></개정문></LawService>";
+
+    #[test]
+    fn date_text_reads_the_source_without_nul() {
+        let found = date_text(NUL_XML.as_bytes()).unwrap();
+        assert_eq!(found.body, "제1조(목적) 이 조례는 목적으로 한다.\n");
+        assert_eq!(
+            found
+                .addenda
+                .iter()
+                .map(|addendum| addendum.text.as_str())
+                .collect::<Vec<_>>(),
+            vec!["이 조례는 공포한 날부터 시행한다."]
+        );
+        assert_eq!(found.declaration, "개정문\n");
+    }
+
+    #[test]
+    fn without_nul_borrows_clean_input_and_counts_removed_nul() {
+        let (clean, count) = without_nul(b"<a>x</a>");
+        assert!(matches!(clean, std::borrow::Cow::Borrowed(_)));
+        assert_eq!((clean.as_ref(), count), (b"<a>x</a>".as_slice(), 0));
+        let (stripped, count) = without_nul(b"\0<a>\0x\0</a>");
+        assert!(matches!(stripped, std::borrow::Cow::Owned(_)));
+        assert_eq!((stripped.as_ref(), count), (b"<a>x</a>".as_slice(), 3));
+    }
+
+    #[test]
+    fn promulgation_number_reads_the_source_without_nul() {
+        assert_eq!(
+            promulgation_number(
+                "<LawService><공포번호>0\u{0}35</공포번호></LawService>".as_bytes()
+            ),
+            Some(35)
+        );
     }
 }
