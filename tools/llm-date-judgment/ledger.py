@@ -18,6 +18,37 @@ from pathlib import Path
 SCHEMA_VERSION = 1
 TOP_KEYS = {'schema_version', 'dataset', 'policy', 'protected_list_sha256', 'entries'}
 POLICY_KEYS = ('model', 'effort', 'prompt_version', 'runner_version')
+API_POLICY_KEYS = ('backend', 'endpoint_sha256', 'response_format')
+
+
+def has_api_policy(entry):
+    return any(key in entry for key in API_POLICY_KEYS)
+
+
+def require_cli_measurement(entry):
+    if has_api_policy(entry):
+        raise LedgerError('measurement policy mismatch')
+
+
+def validate_policy(policy, exact=True):
+    if not isinstance(policy, dict):
+        raise LedgerError('invalid policy')
+    keys = POLICY_KEYS + API_POLICY_KEYS if has_api_policy(policy) else POLICY_KEYS
+    if exact and set(policy) != set(keys):
+        raise LedgerError('invalid policy fields')
+    if any(not isinstance(policy.get(k), str) for k in keys):
+        raise LedgerError('invalid policy value')
+    if has_api_policy(policy):
+        sha = policy['endpoint_sha256']
+        if (policy['backend'] != 'openai' or len(sha) != 64 or any(c not in '0123456789abcdef' for c in sha)
+                or policy['response_format'] not in ('json_schema', 'json_object')):
+            raise LedgerError('invalid API policy')
+
+
+def same_policy(left, right, call=False):
+    keys = POLICY_KEYS + API_POLICY_KEYS
+    return all((key in left) == (key in right) and left.get(key) == right.get(key)
+               for key in keys if not (call and key == 'runner_version'))
 KEY_FIELDS = ('dataset', 'identity', 'revision', 'source_sha256')
 EXCLUDED_REASON = '사용자 결정 보호'
 PROTECTION_DECISION = 'lead-user-decision-protection-20261116'
@@ -222,21 +253,23 @@ def validate(doc, dataset):
         raise LedgerError('unknown schema_version')
     if doc['dataset'] != dataset:
         raise LedgerError('dataset mismatch')
-    if doc['policy'] is not None and (not isinstance(doc['policy'], dict) or set(doc['policy']) != set(POLICY_KEYS)):
-        raise LedgerError('policy must hold exactly ' + ', '.join(POLICY_KEYS))
+    if doc['policy'] is not None:
+        validate_policy(doc['policy'])
     keys = []
     for e in doc['entries']:
         if e.get('kind') not in ('judged', 'excluded', 'failed'):
             raise LedgerError('entry kind must be judged, excluded or failed')
         if set(e['key']) != set(KEY_FIELDS) or e['key']['dataset'] != dataset:
             raise LedgerError('entry key fields or dataset mismatch')
+        if e['kind'] in ('judged', 'failed') and has_api_policy(e):
+            validate_policy(e, exact=False)
         keys.append(key_of(e))
     if keys != sorted(keys) or len(set(keys)) != len(keys):
         raise LedgerError('entries must be sorted by key without duplicates')
 
 
 def policy_matches(entry, policy):
-    return entry.get('kind') == 'judged' and all(entry.get(k) == policy[k] for k in POLICY_KEYS)
+    return entry.get('kind') == 'judged' and same_policy(entry, policy)
 
 
 def load_protected(path):

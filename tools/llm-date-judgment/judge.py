@@ -30,6 +30,25 @@ sys.path.insert(0, str(HERE))
 import checks  # noqa: E402
 import ledger as ledger_mod  # noqa: E402
 import source_text  # noqa: E402
+import openai_backend  # noqa: E402
+
+
+def backend_config(args):
+    refuse_paid_key()
+    return openai_backend.configure(getattr(args, 'backend', 'claude'), getattr(args, 'base_url', None),
+                                    getattr(args, 'api_key_env', None), getattr(args, 'response_format', None),
+                                    args.model, args.effort, args.timeout)
+
+
+def dispatch(claude_bin, prompt, schema, model, effort, workdir, timeout, config=None):
+    refuse_paid_key()
+    if config is None:
+        return call_cli(claude_bin, prompt, schema, model, effort, workdir, timeout)
+    return openai_backend.call(config, prompt, schema, model, SYSTEM, timeout, one_line)
+
+
+def policy_extension(policy):
+    return {key: policy[key] for key in ledger_mod.API_POLICY_KEYS if key in policy}
 
 RUNNER_VERSION = 'r2'
 PROMPT_FILE = HERE / 'prompts' / 'v2.md'
@@ -176,6 +195,7 @@ def build_entry(target, meta, fields, judgment, policy, raw_ref, usage, excerpt,
                    'source_path': target.get('path')},
         'parser_at_judgment': target.get('parser'), 'raw_ref': raw_ref, 'usage': usage,
     }
+    entry.update(policy_extension(policy))
     entry['cross_check_at_judgment'] = cross_check(target, entry)
     return entry
 
@@ -197,11 +217,20 @@ def recheck_factory(cache):
     return recheck
 
 
+def policy_root(ops, name, policy):
+    root = Path(ops) / name
+    model = policy['model']
+    if ledger_mod.has_api_policy(policy):
+        root = root / 'openai' / policy['endpoint_sha256'] / policy['response_format']
+        model = hashlib.sha256(model.encode()).hexdigest()
+    return root / policy['prompt_version'] / model / policy['effort']
+
+
 def raw_root(ops, policy):
-    return Path(ops) / 'raw' / policy['prompt_version'] / policy['model'] / policy['effort']
+    return policy_root(ops, 'raw', policy)
 
 
-def find_raw(ops, policy, sha):
+def find_raw(ops, policy, sha, config=None):
     """The newest raw call for this source whose call arguments match the policy (model, effort,
     prompt_version; design section 17), that ended with exit 0 and that holds a usable judgment, or None."""
     root = raw_root(ops, policy)
@@ -213,19 +242,28 @@ def find_raw(ops, policy, sha):
             judgment, info = parse_response((d / 'stdout.json').read_text(encoding='utf-8'))
         except (OSError, ValueError):
             continue
-        if all(args.get(k) == policy[k] for k in JUDGE_POLICY_KEYS) and judgment is not None and args.get('exit') == 0:
+        if ledger_mod.same_policy(args, policy, call=True) and judgment is not None and args.get('exit') == 0:
+            if ledger_mod.has_api_policy(policy):
+                try:
+                    if config is None:
+                        continue
+                    envelope = openai_backend.loads((d / 'stdout.json').read_text(encoding='utf-8'))
+                    judgment = openai_backend.validate_judgment(envelope['structured_output'],
+                                openai_backend.loads(current_prompt()[1]), config['sensitive'], one_line)
+                except (ValueError, KeyError, TypeError, RecursionError):
+                    continue
             return d, args, judgment, info
     return None
 
 
 def failures_root(ops, policy):
-    return Path(ops) / 'failures' / policy['prompt_version'] / policy['model'] / policy['effort']
+    return policy_root(ops, 'failures', policy)
 
 
 def run(args):
     try:
-        refuse_paid_key()
-    except PaidKeyError as error:
+        backend_config(args)
+    except (PaidKeyError, openai_backend.BackendError) as error:
         print(error, file=sys.stderr)
         return 2
     ops = Path(args.ops)
@@ -245,14 +283,17 @@ def run(args):
 
 def run_locked(args, ops):
     """The body of run; the caller holds the operations lock."""
+    config = backend_config(args)
     ledger_mod.remove_temporary(ops / 'ledger', ops / 'ledger-history', ops / 'failures')
     template, schema, pversion = current_prompt()
     policy = {'model': args.model, 'effort': args.effort, 'prompt_version': pversion, 'runner_version': RUNNER_VERSION}
+    if config is not None:
+        policy.update(config['policy'])
     protected, revisions, list_sha = ledger_mod.load_protected(args.protected)
     led = ledger_mod.Ledger(ops, args.dataset)
     targets = json.loads(Path(args.targets).read_text(encoding='utf-8'))['targets']
     held = led.load()['policy']
-    if held is not None and any(held[k] != policy[k] for k in JUDGE_POLICY_KEYS):
+    if held is not None and not ledger_mod.same_policy(held, policy, call=True):
         # lead-compiler2-f3-20261116: a policy change makes every key a new call, so it needs an
         # explicit argument and the count comes first.
         if not args.replace_policy:
@@ -325,7 +366,7 @@ def run_locked(args, ops):
             continue
         # Design section 17: a raw response is restored only for a key that has no entry; a key with
         # an entry of another policy or an old runner that failed its recheck is judged again.
-        found = find_raw(ops, policy, key['source_sha256']) if k not in entries else None
+        found = find_raw(ops, policy, key['source_sha256'], config) if k not in entries else None
         if found is not None:
             d, call_args, judgment, info = found
             raw_ref = {'path': str(d.relative_to(ops)), 'stdout_sha256': ledger_mod.file_sha256(d / 'stdout.json')}
@@ -346,7 +387,7 @@ def run_locked(args, ops):
         with open(calls_log, 'a', encoding='utf-8') as fh:
             fh.write(f'{judged_at}\t{policy["model"]}\t{"|".join(k)}\n')
         try:
-            proc, seconds = call_cli(args.claude, prompt, schema, policy['model'], policy['effort'], workdir, args.timeout)
+            proc, seconds = dispatch(args.claude, prompt, schema, policy['model'], policy['effort'], workdir, args.timeout, config)
             stdout, stderr, exit_code = proc.stdout, proc.stderr, proc.returncode
         except subprocess.TimeoutExpired:
             stdout, stderr, exit_code, seconds = '', 'timeout', 124, args.timeout
@@ -404,14 +445,16 @@ def failed_entry(key, policy, failures, last_error):
     return {'key': dict(key), 'kind': 'failed', 'reason': '지속 실패', 'failures': failures, 'last_error': last_error,
             'model': policy['model'], 'effort': policy['effort'], 'prompt_version': policy['prompt_version'],
             'runner_version': policy['runner_version'],
-            'judged_at': datetime.datetime.now(datetime.timezone.utc).strftime('%Y-%m-%dT%H:%M:%SZ')}
+            'judged_at': datetime.datetime.now(datetime.timezone.utc).strftime('%Y-%m-%dT%H:%M:%SZ'), **policy_extension(policy)}
 
 
-def judge_file(dataset, source, model, effort, next_promulgation, out, claude_bin='claude', timeout=900):
+def judge_file(dataset, source, model, effort, next_promulgation, out, claude_bin='claude', timeout=900,
+               *, backend='claude', base_url=None, api_key_env=None, response_format=None):
     """Judges one source file for measurement: writes prompt.txt, stdout.json, stderr.txt and
     entry.json into the new folder out. Writes no ledger. Raises PaidKeyError when
     ANTHROPIC_API_KEY is set."""
     refuse_paid_key()
+    config = openai_backend.configure(backend, base_url, api_key_env, response_format, model, effort, timeout)
     out = Path(out)
     out.mkdir(parents=True, exist_ok=False)
     template, schema, pversion = current_prompt()
@@ -423,10 +466,12 @@ def judge_file(dataset, source, model, effort, next_promulgation, out, claude_bi
              'model': model, 'effort': effort, 'prompt_version': pversion, 'runner_version': RUNNER_VERSION,
              'body_excerpt': excerpt, 'next_promulgation': next_promulgation,
              'judged_at': datetime.datetime.now(datetime.timezone.utc).strftime('%Y-%m-%dT%H:%M:%SZ')}
+    if config is not None:
+        entry.update(config['policy'])
     workdir = out.parent / 'empty-cwd'
     workdir.mkdir(exist_ok=True)
     try:
-        proc, seconds = call_cli(claude_bin, prompt, schema, model, effort, workdir, timeout)
+        proc, seconds = dispatch(claude_bin, prompt, schema, model, effort, workdir, timeout, config)
     except subprocess.TimeoutExpired:
         entry.update({'call': {'error': 'timeout', 'seconds': timeout}, 'adoptable': False, 'judgment': None, 'date': ''})
         (out / 'entry.json').write_text(json.dumps(entry, ensure_ascii=False, indent=1), encoding='utf-8')
@@ -447,16 +492,18 @@ def judge_file(dataset, source, model, effort, next_promulgation, out, claude_bi
 
 def one(args):
     try:
-        refuse_paid_key()
-    except PaidKeyError as error:
+        config = backend_config(args)
+    except (PaidKeyError, openai_backend.BackendError) as error:
         print(error, file=sys.stderr)
         return 2
     template, schema, pversion = current_prompt()
     meta, fields = source_text.read_source(args.source, args.dataset)
     prompt, excerpt = render(template, meta, fields, args.next_promulgation)
-    proc, seconds = call_cli(args.claude, prompt, schema, args.model, args.effort, Path(args.workdir), args.timeout)
+    proc, seconds = dispatch(args.claude, prompt, schema, args.model, args.effort, Path(args.workdir), args.timeout, config)
     judgment, info = response_of(proc.stdout, proc.returncode)
     out = {'prompt_version': pversion, 'seconds': seconds, 'call': info}
+    if config is not None:
+        out.update(config['policy'])
     if judgment is not None:
         adoptable, results = checks.check(one_line(judgment), meta, fields, args.next_promulgation)
         out.update({'judgment': judgment, 'checks': results, 'adoptable': adoptable})
@@ -474,6 +521,10 @@ def main(argv=None):
         p.add_argument('--effort', default='default')
         p.add_argument('--claude', default='claude')
         p.add_argument('--timeout', type=int, default=900)
+        p.add_argument('--backend', choices=('claude', 'openai'), default='claude')
+        p.add_argument('--base-url')
+        p.add_argument('--api-key-env')
+        p.add_argument('--response-format', choices=('json_schema', 'json_object'))
     o = sub.choices['one']
     o.add_argument('--source', required=True)
     o.add_argument('--next-promulgation')
