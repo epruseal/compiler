@@ -18,6 +18,46 @@ use serde_json::Value;
 const SCHEMA_VERSION: u64 = 1;
 /// The policy fields of the ledger head and of each judged entry.
 const POLICY_KEYS: [&str; 4] = ["model", "effort", "prompt_version", "runner_version"];
+const API_POLICY_KEYS: [&str; 3] = ["backend", "endpoint_sha256", "response_format"];
+
+fn read_policy(
+    object: &serde_json::Map<String, Value>,
+    exact: bool,
+) -> Result<BTreeMap<String, String>> {
+    let api = API_POLICY_KEYS.iter().any(|key| object.contains_key(*key));
+    let keys: Vec<&str> = POLICY_KEYS
+        .into_iter()
+        .chain(API_POLICY_KEYS.into_iter().filter(|_| api))
+        .collect();
+    ensure!(!exact || object.len() == keys.len(), "ledger policy fields");
+    let mut policy = BTreeMap::new();
+    for key in keys {
+        let value = object
+            .get(key)
+            .and_then(Value::as_str)
+            .with_context(|| format!("ledger policy lacks {key}"))?;
+        policy.insert(key.to_owned(), value.to_owned());
+    }
+    if api {
+        ensure!(policy["backend"] == "openai", "invalid ledger backend");
+        let sha = &policy["endpoint_sha256"];
+        ensure!(
+            sha.len() == 64
+                && sha
+                    .bytes()
+                    .all(|c| c.is_ascii_digit() || (b'a'..=b'f').contains(&c)),
+            "invalid endpoint hash"
+        );
+        ensure!(
+            matches!(
+                policy["response_format"].as_str(),
+                "json_schema" | "json_object"
+            ),
+            "invalid response format"
+        );
+    }
+    Ok(policy)
+}
 /// The key fields of an entry.
 const KEY_FIELDS: [&str; 4] = ["dataset", "identity", "revision", "source_sha256"];
 /// The parser category of a phase 1 judgment: the parser could not date the revision.
@@ -118,18 +158,7 @@ impl LlmLedger {
         let head = doc["policy"]
             .as_object()
             .context("ledger without a policy")?;
-        ensure!(
-            head.len() == POLICY_KEYS.len(),
-            "ledger policy must hold exactly {POLICY_KEYS:?}"
-        );
-        let mut policy = BTreeMap::new();
-        for key in POLICY_KEYS {
-            let value = head
-                .get(key)
-                .and_then(Value::as_str)
-                .with_context(|| format!("ledger policy lacks {key}"))?;
-            policy.insert(key.to_owned(), value.to_owned());
-        }
+        let policy = read_policy(head, true)?;
         let protected_list_sha256 = match &doc["protected_list_sha256"] {
             Value::Null => None,
             Value::String(sha) => Some(sha.clone()),
@@ -162,6 +191,11 @@ impl LlmLedger {
                 matches!(kind, "judged" | "excluded" | "failed"),
                 "entry kind must be judged, excluded or failed"
             );
+            if matches!(kind, "judged" | "failed")
+                && API_POLICY_KEYS.iter().any(|key| entry.get(*key).is_some())
+            {
+                read_policy(entry.as_object().context("entry object")?, false)?;
+            }
             let key = (parts[1].clone(), parts[2].clone(), parts[3].clone());
             if let Some(usable) = usable(entry, kind, &policy, &JUDGE_CATEGORIES)? {
                 entries.insert(key, usable);
@@ -228,10 +262,10 @@ fn usable(
     if kind != "judged" || entry["adoptable"] != Value::Bool(true) {
         return Ok(None);
     }
-    if POLICY_KEYS
-        .iter()
-        .any(|key| entry[*key].as_str() != policy.get(*key).map(String::as_str))
-    {
+    if POLICY_KEYS.iter().chain(API_POLICY_KEYS.iter()).any(|key| {
+        entry.get(*key).is_some() != policy.contains_key(*key)
+            || entry[*key].as_str() != policy.get(*key).map(String::as_str)
+    }) {
         return Ok(None);
     }
     let parser = &entry["parser_at_judgment"];
@@ -383,6 +417,53 @@ mod tests {
                 .replace(r#", "cross_check_at_judgment": "disagree""#, ""),
         );
         assert!(LlmLedger::parse(text.as_bytes(), "ordinances").is_err());
+    }
+
+    #[test]
+    fn isolates_api_and_cli_policy_variants() {
+        let extension = serde_json::json!({"backend": "openai", "endpoint_sha256": "a".repeat(64), "response_format": "json_schema"});
+        let mut doc: Value = serde_json::from_str(&ledger(&judged("10", ""))).unwrap();
+        doc["entries"][0]
+            .as_object_mut()
+            .unwrap()
+            .extend(extension.as_object().unwrap().clone());
+        assert!(
+            LlmLedger::parse(&serde_json::to_vec(&doc).unwrap(), "ordinances")
+                .unwrap()
+                .is_empty()
+        );
+        doc["policy"]
+            .as_object_mut()
+            .unwrap()
+            .extend(extension.as_object().unwrap().clone());
+        assert_eq!(
+            LlmLedger::parse(&serde_json::to_vec(&doc).unwrap(), "ordinances")
+                .unwrap()
+                .len(),
+            1
+        );
+        for field in API_POLICY_KEYS {
+            let mut missing = doc.clone();
+            missing["entries"][0].as_object_mut().unwrap().remove(field);
+            assert!(
+                LlmLedger::parse(&serde_json::to_vec(&missing).unwrap(), "ordinances").is_err()
+            );
+        }
+        for bad in [Value::String("bad".to_owned()), Value::Null] {
+            let mut malformed = doc.clone();
+            malformed["policy"]["endpoint_sha256"] = bad;
+            assert!(
+                LlmLedger::parse(&serde_json::to_vec(&malformed).unwrap(), "ordinances").is_err()
+            );
+        }
+        for field in API_POLICY_KEYS {
+            doc["entries"][0].as_object_mut().unwrap().remove(field);
+        }
+        assert!(
+            LlmLedger::parse(&serde_json::to_vec(&doc).unwrap(), "ordinances")
+                .unwrap()
+                .is_empty()
+        );
     }
 
     #[test]

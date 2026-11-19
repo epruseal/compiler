@@ -97,7 +97,7 @@ def run(models, index_path, out, cap, spec=None):
             if (target / 'entry.json').exists():
                 done = json.loads((target / 'entry.json').read_text(encoding='utf-8'))
                 failed = (done.get('call') or {}).get('exit') != 0 or (done.get('call') or {}).get('is_error') or not done.get('judgment')
-                if done.get('prompt_version') == current_version and not failed:
+                if done.get('prompt_version') == current_version and not failed and not judge.ledger_mod.has_api_policy(done):
                     continue
             if target.exists():
                 (target.parent / (target.name + '.abandoned')).mkdir(parents=True, exist_ok=True)
@@ -135,6 +135,7 @@ def score(out):
                 m['not_run'] += 1
                 continue
             e = json.loads(f.read_text(encoding='utf-8'))
+            judge.ledger_mod.require_cli_measurement(e)
             versions.add((e.get('prompt_version'), e.get('effort')))
             j = e.get('judgment') or {}
             if j and (e.get('call') or {}).get('exit') == 0 and not (e.get('call') or {}).get('is_error'):

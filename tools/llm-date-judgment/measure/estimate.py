@@ -12,6 +12,9 @@ import statistics
 import sys
 from pathlib import Path
 
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+import ledger  # noqa: E402
+
 PARENTS = ('조내용', '조문내용', '부칙', '제개정이유', '개정문')
 BODY_LIMIT = 30000
 
@@ -22,6 +25,7 @@ def main():
     xs, ys, outs, secs, usd, ratios = [], [], [], [], [], []
     for entry_file in sorted((run_dir / model).glob('*/entry.json')):
         e = json.loads(entry_file.read_text(encoding='utf-8'))
+        ledger.require_cli_measurement(e)
         call = e.get('call') or {}
         u = call.get('usage') or {}
         if not u:

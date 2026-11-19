@@ -85,6 +85,24 @@ python3 -m unittest discover tools/llm-date-judgment/tests
 
 실행기는 운영 폴더의 잠금을 잡고 대상을 순서대로 하나씩 부른다. 원장 policy와 다른 모델, effort, 프롬프트로 실행하면 `--replace-policy` 없이 거부한다. 판단 없음이 연속 5번이면 멈추고 마지막 오류 요약과 그 다섯 키(`stop_keys`)를 보고한다. 직전 멈춤과 다른 키 묶음에서 멈추면 공통 원인(사용 한도, 로그인)으로 보아 그 실패를 대상별 실패 수에서 뺀다. 직전 멈춤과 같은 키 묶음에서 다시 멈추면 뺀 실패까지 다시 센다. 그래서 세 번째 같은 멈춤 뒤에는 그 대상들을 건너뛴다(lead-compiler2-a2-a3-20261117). 3번 실패한 대상은 건너뛰고 보고에 수와 키를 적는다. 원장에는 날짜 없이 `kind: failed`, 사유 "지속 실패", 실패 횟수, 마지막 오류 요약으로 남고, compiler는 파서 결과나 미해결을 그대로 둔다. `--retry-failed`를 주면 실행 시작 때 그 policy의 실패 기록을 비우고 다시 부른다. 모델, effort, 프롬프트를 바꿔도 새로 센다. 재시도 뒤 다시 건너뛴 대상의 `failed` 항목은 새 실패 횟수와 오류로 바뀐다. 원천 파일이 없거나 바뀐 대상도 건너뛰고 키를 적는다. 원 응답만 있고 원장 항목이 없는 키는 같은 모델, effort, 프롬프트 판의 원 응답에서 항목을 복원한다. 실행기 판은 보지 않고 현재 검사를 다시 한다. 복원 항목의 입력 조건(다음 판본 공포일, 파서 결과)은 호출 때의 값이다. `one`과 측정 스크립트를 포함해 모든 호출은 `ANTHROPIC_API_KEY`가 있으면 거부된다.
 
+## OpenAI 호환 API
+
+`one`과 `run`의 기본 backend는 `claude`이며 기존 CLI 호출과 원장 형식을 유지한다. `--backend openai`를 주면 Chat Completions API를 호출한다. 실제 API 호출과 과금 승인은 구현 승인과 별개다. 시험은 가짜 서버와 가짜 키만 사용한다.
+
+```sh
+python3 -I tools/llm-date-judgment/judge.py one --dataset admrules --source <source.xml> \
+  --model <model> --workdir <empty-folder> --backend openai --base-url <base-url> \
+  --api-key-env <key-variable> --timeout 900
+```
+
+base URL은 `/v1` 같은 API 접두사까지 받으며 실행기가 `/chat/completions`를 붙인다. HTTP와 HTTPS를 받는다. 인증 정보, query와 fragment가 든 URL은 거부한다. 키는 지정한 환경 변수에서만 읽으며 기본 이름은 `OPENAI_API_KEY`다. 키에는 공백 없는 visible ASCII 문자만 허용한다. `ANTHROPIC_API_KEY`가 존재하면 두 backend 모두 거부한다. 이 규칙은 다른 환경 변수의 키가 무료임을 보장하지 않는다.
+
+기본 응답 형식은 `--response-format json_schema`다. 서버가 이를 지원하지 않으면 사용자가 `--response-format json_object`를 명시한다. 실행기는 자동으로 형식을 바꾸거나 재시도하지 않는다. redirect와 환경 proxy도 사용하지 않는다. API backend는 기본 effort만 받는다. 두 backend는 같은 시스템 문구, 프롬프트, 스키마와 기계 검사를 사용한다. API 응답은 중첩 값까지 스키마를 검사한다. 지원하지 않는 스키마 keyword도 거부한다.
+
+API 정책과 판단 또는 실패 항목에는 `backend: openai`, 최종 endpoint의 `endpoint_sha256`, `response_format`을 추가한다. 기존 CLI 정책에는 이 필드들이 없다. endpoint, backend, model 또는 응답 형식이 달라지면 `--replace-policy`가 필요하다. 양쪽 정책의 필드 부재도 비교하므로 서로의 판단을 채택하지 않는다. API raw와 failures 경로는 `openai/<endpoint_sha256>/<response_format>/<prompt_version>/<model_sha256>/<effort>`를 사용한다. 이전 정책의 실패 수와 raw 복구를 섞지 않는다.
+
+실행기는 URL, 키와 키 환경 변수 이름을 기록하지 않는다. 성공 응답도 이 문자열을 반사하면 거부한다. 공백 정규화 전후에 검사한다. 실패 응답은 본문이나 예외 대신 고정 오류 분류만 남긴다. API 사용량은 `prompt_tokens`, `completion_tokens`, `total_tokens`의 음수가 아닌 정수만 남기며 가격을 계산하지 않는다. `gold_run`과 `estimate`는 CLI 전용이다. `gold_run run`은 남은 API 결과를 보존한 뒤 CLI로 다시 호출하며 `score`와 `estimate`는 API 전용 표본과 혼합 표본을 거부한다.
+
 ## 사용자 결정 보호 목록
 
 정본은 `git-writer/data/llm-protected-revisions.json`이다. 결정 기록(compiler#1 이슈 본문과 댓글 전량, compiler#2 본문, 시행일 예외 문서)에서 판본 번호를 기계적으로 뽑고 분류해 만들었다(`tools/llm-date-judgment/measure/protect_candidates.py`, `protect_classify.py`). 보호 기준은 다음과 같다.
