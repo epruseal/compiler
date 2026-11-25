@@ -1,6 +1,6 @@
 # LLM 시행일 판단 정책
 
-이 문서는 compiler의 enforcement 모드에서 LLM이 정하거나 교차 확인하는 시행일의 정책을 적는다. 판단 결과는 원장 파일에 따로 저장하고, 이 문서는 판단 정책, 프롬프트, 대상 범주, 사용자 결정 보호 목록을 정한다. 정본 이슈는 epruseal/compiler#2다.
+이 문서는 compiler의 enforcement 모드에서 LLM이 정하거나 교차 확인하는 시행일의 정책을 적는다. 판단 결과는 원장 파일에 따로 저장하고, 이 문서는 판단 정책, 프롬프트, 대상 범주, 사용자 결정 보호 목록을 정한다. 정본 이슈는 epruseal/compiler#2다. 사례와 측정 기록은 [LLM 시행일 판단 기록](https://github.com/epruseal/compiler/blob/docs/llm-date-judgment-findings/docs/llm-date-judgment-findings.md)에, 파서 규칙의 예외와 사례는 [시행일 예외 기록](https://github.com/epruseal/compiler/blob/docs/enforcement-date-exceptions/docs/enforcement-date-exceptions.md)에 있다. 두 기록은 main에 없고 각각 `docs/llm-date-judgment-findings`와 `docs/enforcement-date-exceptions` 브랜치에 있다.
 
 ## 결정 근거
 
@@ -14,6 +14,9 @@
 - `lead-compiler2-line-end-20261116`: 줄 끝은 문장 끝이 아니다(2026-11-09 사용자 결정과 같다).
 - `lead-compiler2-a2-a3-20261117`: 실행기는 직전 멈춤과 다른 키 묶음에서 멈춘 실패를 실패 수에서 뺀다. 같은 키 묶음에서 다시 멈추면 뺀 실패까지 다시 센다. 세 번째 같은 멈춤 뒤에는 그 대상을 날짜 없는 `failed` 항목으로 남기고 건너뛴다. 유료 API 키 거부는 모든 호출 경로(run, one, 측정 스크립트)에 걸린다.
 - 긴 부칙 발췌(사용자 결정 2026-11-16): 누적 부칙이 길면 프롬프트에는 구역을 제목 줄째로 골라 싣는다. 기계 검사는 발췌가 아니라 원문 칸 전체에서 인용을 확인한다. 두 조건을 지킬 때만 발췌를 쓴다.
+- `user-compiler2-phase2-pilot-20261117`(compiler#2 댓글 6936322052): 2단계 교차 확인은 시범 약 500건만 먼저 돌린다.
+- `user-stage2-stop-20261117`(PR #7 본문의 결정 근거, LLM 시행일 판단 기록): 2단계는 시범에서 멈추고 나머지 후보는 돌리지 않는다.
+- compiler 통합의 사용자 결정과 리드 재정(`lead-c2-integration-contract-20261117` 등)은 PR #7 본문의 "결정 근거" 절에 있다.
 
 ## 대상과 우선순위
 
@@ -166,9 +169,9 @@ Opus와 Sonnet의 잘못 채택 1건(2200000095587)은 자기 부칙이 없는 �
 
 ## 표시
 
-LLM이 정한 날짜는 date index의 status `llm`, frontmatter의 `날짜판단상태: "llm"`과 `시행일근거문장`, 커밋 제목의 " (LLM 판단)"으로 파서 결과와 구별된다. 이 표시는 compiler#1 제품 이식 뒤 compiler 통합에서 구현한다. cli-tools는 epruseal/cli-tools#2에서 "LLM 판단"과 근거 문장을 보인다.
+LLM이 정한 날짜는 date index의 status `llm`, frontmatter의 `날짜판단상태: "llm"`과 `시행일근거문장`, 커밋 제목의 " (LLM 판단)"으로 파서 결과와 구별된다. compiler 통합(PR #7)이 이 표시를 구현했고, `--llm-ledger`를 준 시행일 모드 빌드에만 나타난다. 옵션과 교차 확인 불일치의 처리는 README의 날짜 기준 옵션 절에 있다. cli-tools는 epruseal/cli-tools#2를 구현한 epruseal/cli-tools PR 5에서 "LLM 판단"과 근거 문장, 교차 확인 불일치를 보인다.
 
 ## 사용자 확인 항목
 
 - 사본 내용이 다른 판본의 날짜 채택 여부(사용자 결정: 채택하지 않고 후보만 남긴다).
-- 2단계 교차 확인 실행은 1단계 결과를 사용자에게 보인 뒤 정한다.
+- 2단계 교차 확인의 실행 범위(사용자 결정: 시범 약 500건만 돌리고 시범에서 멈춘다, `user-compiler2-phase2-pilot-20261117`, `user-stage2-stop-20261117`).

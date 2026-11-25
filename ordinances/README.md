@@ -29,6 +29,7 @@ ordinance-kr-compiler ../.cache/ordinance -o ./another.git
 
 저장소를 쓰기 전에 캐시 상태만 JSON으로 확인하려면 `--validate`를 사용합니다.
 빌드 결과의 `HEAD`와 엔트리 수는 `--manifest <path>`로 기록할 수 있습니다.
+커밋 날짜 기준을 고르는 `--commit-date-basis`, 날짜 index와 `--llm-ledger`는 [루트 README](../README.md#날짜-기준-옵션의-구현-상태)에 있습니다.
 기존 Markdown tree 디렉토리 출력이 필요하면 `--tree`를 사용합니다.
 
 ```bash
@@ -75,7 +76,7 @@ ordinance-kr-compiler ../.cache/ordinance --tree -o ./ordinance-tree
 - branch는 `main`입니다.
 - 결과 저장소의 루트 `README.md`는 [`assets/README.md`](assets/README.md)를 사용합니다.
 - commit author/committer는 `legalize-kr-bot <bot@legalize.kr>`입니다.
-- commit timestamp는 공포일자 기준 KST `12:00:00`입니다.
+- 기본 공포일 빌드의 commit timestamp는 공포일자 기준 KST `12:00:00`입니다.
 - `1970-01-01` 이전 날짜 또는 잘못된 날짜는 epoch 이전 commit을 피하기 위해 clamp합니다.
 
 ## 개발
