@@ -106,6 +106,11 @@ Git commit 시각은 1970-01-01보다 앞설 수 없어서, 1970년 이전 시�
 예를 들어 `git log --grep='^Effective-Date: 1960-08-10$'`로 그 날짜의 commit을 찾습니다.
 consumer CLI의 날짜 조회(`--date`와 `--date-index`)는 index의 날짜를 쓰므로 이 제한을 받지 않습니다.
 기본 공포일 빌드의 commit message에는 이 trailer가 없습니다.
+`enforcement` 빌드의 판본 commit과 폐지 삭제 commit의 제목은 status가 `estimated`이면 ` (추정)`, `llm`이면 ` (LLM 판단)`으로 끝납니다.
+본문은 `revision`, `event_date`, `status`, `reason` 줄, 빈 줄, 기본 빌드 commit과 같은 식별 줄, 빈 줄, `Effective-Date` trailer 순서입니다.
+식별 줄은 trailer 문단에 들지 않습니다.
+식별 줄은 자치법규가 `자치법규ID`와 `자치법규일련번호`, 행정규칙이 `행정규칙일련번호`와 `행정규칙ID`, 법령이 `법령MST`입니다.
+`enforcement` 본문 frontmatter에는 `날짜판단상태`(index의 status), `법적시행일`(index의 `enforcement_date`), `검색배치일`(시행일이 있으면 시행일, 없으면 `exposure_date`), `시행일판단근거`(index의 reason)가 더해집니다.
 
 `enforcement` 저장소의 첫 README commit은 기본 빌드와 같은 고정 날짜(2026-03-30 12:00 KST)를 씁니다.
 날짜 조회는 commit 시각이 아니라 index의 snapshot 날짜를 씁니다.
@@ -117,7 +122,29 @@ consumer CLI의 날짜 조회(`--date`와 `--date-index`)는 index의 날짜를 
 날짜가 있는 판본(`confirmed`, `estimated`, `llm`)의 근거 `separate_application_timing`이 비어 있지 않으면 표지를 답니다. 이 목록은 부칙에서 주된 시행 문장을 뺀 줄 가운데 `시행한다`나 `적용한다`를 담은 줄입니다. 조문별 시행일 외에 경과조치, 적용례, 줄 단위로 잘린 조각이 들어갈 수 있습니다. 표지가 붙으면 index의 판본 항목에 `separate_application_timing: true`를 쓰고, `enforcement` 본문 frontmatter에 `별도적용시기: true`와 그 문장 목록 `별도적용시기문장`을 씁니다. 표지가 없는 판본에는 이 키들이 없습니다.
 기본 공포일 빌드에서는 manifest를 출력 저장소 안에 두어도 됩니다.
 
-부칙 해석 규칙(귀속, 라벨, 단서, 폐지제정 등)과 개별 사례의 정본은 [시행일 예외 기록](docs/enforcement-date-exceptions.md)입니다.
+행정규칙과 자치법규 컴파일러는 LLM 판단 원장을 읽는 `--llm-ledger <운영 폴더>`를 받습니다.
+이 옵션은 `--commit-date-basis enforcement`에서만 받으며, 다른 기준과 함께 주면 `--llm-ledger requires --commit-date-basis enforcement` 오류로 끝납니다.
+법령 컴파일러에는 이 옵션이 없습니다.
+컴파일러는 `<운영 폴더>/ledger/<dataset>.json` 정본만 읽고 journal은 읽지 않습니다. 원장 형식이 맞지 않으면 빌드가 실패합니다.
+컴파일러는 판단이 있고, 기계 검사를 통과했고(`adoptable`), 원장 policy와 같은 policy로 만든 항목 가운데 두 범주만 씁니다.
+첫째는 파서가 날짜를 정하지 못한 판본의 판단입니다. 이 판단은 날짜를 줄 수 있고, 그 날짜를 쓴 판본의 status는 `llm`이며 본문 frontmatter에 인용 문장 `시행일근거문장`이 더해집니다.
+둘째는 파서가 XML 시행일자 없이 정한 판본의 교차 확인입니다. 교차 확인 항목은 판단 때의 결과(`cross_check_at_judgment`)도 가져야 하며, 날짜를 주지 않습니다.
+교차 확인 결과가 불일치(`disagree`)인 사본이 있으면 그 판본에서 파서가 날짜를 정한(`confirmed`, `estimated`) 사본은 모두 미해결이 됩니다(공포일이 없으면 undated).
+컴파일러는 판단과 교차 확인의 근거를 index의 `date_evidence` 아래 `llm_judgment`(LLM 날짜를 고른 판단), `llm_not_applied`(판단을 쓰지 않은 사유), `llm_cross_check`(교차 확인 결과) 키로 남깁니다.
+세 키는 `git-writer/src/date_index.rs`의 `resolve_rules_with`(`llm_judgment`, `llm_not_applied`), `check_llm_next_revisions`(`llm_not_applied`), `check_llm_cross`(`llm_cross_check`)가 넣습니다. 어느 판본에 어느 키가 남는지는 이 함수들과 그 뒤의 처리가 정합니다.
+원장을 준 빌드가 manifest에 date_index를 쓰면 그 `schema_version`은 2이고, `date_index.llm_ledger`에 원장의 상대 경로(`ledger/<dataset>.json`), SHA-256, policy, 보호 목록 SHA-256, 쓸 수 있는 판단 수(`usable_judgments`)와 교차 확인 수(`usable_cross_checks`)가 들어갑니다.
+원장을 주지 않으면 원장을 읽지 않고 date_index의 `schema_version`은 1입니다.
+판단 정책, 원장을 만드는 명령과 결정 근거는 [LLM 시행일 판단 정책](docs/llm-date-judgment.md)에 있습니다.
+
+원문에 NUL(U+0000)이 있으면 날짜 규칙은 NUL을 지운 바이트를 읽습니다. 시행 문장을 모으는 부분과 공포번호를 읽는 부분이 여기에 듭니다.
+자치법규 컴파일러는 본문 XML을 파싱할 때도 NUL을 지운 바이트를 씁니다.
+원본 바이트는 바꾸지 않으며, 날짜 index의 `copy_id`와 LLM 원장 대조에 쓰는 SHA-256은 원본 바이트로 계산합니다.
+판본의 날짜 해석이 성공하고 그 원문에 NUL이 있었으면 stderr에 `warning: removed <개수> NUL character(s) from <데이터셋> <식별자> <판본> before parsing` 경고가 나옵니다.
+자치법규 원문 파일의 파싱이 성공하고 NUL을 지웠으면 stderr에 `warning: removed <개수> NUL character(s) from <파일 경로> before parsing` 경고가 나옵니다.
+이 처리는 PR #13에서 들어왔습니다. 그 전에는 NUL이 시행 문장에 끼면 날짜 규칙이 그 문장을 읽지 못해 판본이 미해결로 남을 수 있었습니다.
+
+부칙 해석 규칙(귀속, 라벨, 단서, 폐지제정 등)과 개별 사례의 정본은 [시행일 예외 기록](https://github.com/epruseal/compiler/blob/docs/enforcement-date-exceptions/docs/enforcement-date-exceptions.md)입니다.
+이 기록은 main에 없고 `docs/enforcement-date-exceptions` 브랜치에 있습니다.
 이 README의 규칙 문장과 그 문서가 다르면 그 문서를 따릅니다.
 
 새 법령 후보 renderer는 기존 resolver가 결정한 날짜와 근거를 받습니다.
