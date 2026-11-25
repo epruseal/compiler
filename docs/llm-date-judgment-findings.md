@@ -4,6 +4,7 @@
 
 ## 상태와 판정
 
+- 2026-11-25 기준 머지 상태: 판단 실행기와 원장은 compiler#2 PR 3으로, compiler 통합은 compiler#2 PR 7로, OpenAI 호환 판단 backend는 compiler#15 PR 16으로 main에 머지했다. cli-tools 표시(cli-tools#2)는 cli-tools PR 5로 main에 머지했다. 아래 항목은 모두 머지 전에 쓴 기록이다.
 - 판단 실행기, 원장, 대기열 생성기, 정책 문서, 사용자 결정 보호 목록은 구현했다(브랜치 `issue2-llm-date-judgment`).
   - 구현 뒤 필수 채널과 새 컨텍스트 실행 채널의 검증을 다섯 회차 받았고 마지막 판정은 둘 다 PASS다.
 - compiler 통합(브랜치 `issue2-llm-integration`, compiler#1 PR 4 위)은 구현했다. `--llm-ledger`를 준 시행일 모드에서만 원장의 1단계 채택분을 쓴다. 적용된 판본은 status `llm`, frontmatter, 커밋 제목 표지 "(LLM 판단)"으로 구별된다.
