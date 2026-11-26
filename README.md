@@ -31,6 +31,8 @@ compiler/
 | 행정규칙 | [`admrules/README.md`](admrules/README.md) | [`admrules/assets/README.md`](admrules/assets/README.md) |
 | 자치법규 | [`ordinances/README.md`](ordinances/README.md) | [`ordinances/assets/README.md`](ordinances/assets/README.md) |
 
+시행일 기준 이력의 사례와 결정은 [시행일 예외 문서](docs/enforcement-date-exceptions.md)에 기록합니다.
+
 ## 빠른 시작
 
 ```bash
@@ -143,8 +145,7 @@ consumer CLI의 날짜 조회(`--date`와 `--date-index`)는 index의 날짜를 
 자치법규 원문 파일의 파싱이 성공하고 NUL을 지웠으면 stderr에 `warning: removed <개수> NUL character(s) from <파일 경로> before parsing` 경고가 나옵니다.
 이 처리는 PR #13에서 들어왔습니다. 그 전에는 NUL이 시행 문장에 끼면 날짜 규칙이 그 문장을 읽지 못해 판본이 미해결로 남을 수 있었습니다.
 
-부칙 해석 규칙(귀속, 라벨, 단서, 폐지제정 등)과 개별 사례의 정본은 [시행일 예외 기록](https://github.com/epruseal/compiler/blob/docs/enforcement-date-exceptions/docs/enforcement-date-exceptions.md)입니다.
-이 기록은 main에 없고 `docs/enforcement-date-exceptions` 브랜치에 있습니다.
+부칙 해석 규칙(귀속, 라벨, 단서, 폐지제정 등)과 개별 사례의 정본은 [시행일 예외 기록](docs/enforcement-date-exceptions.md)입니다.
 이 README의 규칙 문장과 그 문서가 다르면 그 문서를 따릅니다.
 
 새 법령 후보 renderer는 기존 resolver가 결정한 날짜와 근거를 받습니다.
