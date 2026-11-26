@@ -1,6 +1,6 @@
 # LLM 시행일 판단 정책
 
-이 문서는 compiler의 enforcement 모드에서 LLM이 정하거나 교차 확인하는 시행일의 정책을 적는다. 판단 결과는 원장 파일에 따로 저장하고, 이 문서는 판단 정책, 프롬프트, 대상 범주, 사용자 결정 보호 목록을 정한다. 정본 이슈는 epruseal/compiler#2다. 사례와 측정 기록은 [LLM 시행일 판단 기록](https://github.com/epruseal/compiler/blob/docs/llm-date-judgment-findings/docs/llm-date-judgment-findings.md)에, 파서 규칙의 예외와 사례는 [시행일 예외 기록](https://github.com/epruseal/compiler/blob/docs/enforcement-date-exceptions/docs/enforcement-date-exceptions.md)에 있다. 두 기록은 main에 없고 각각 `docs/llm-date-judgment-findings`와 `docs/enforcement-date-exceptions` 브랜치에 있다.
+이 문서는 compiler의 enforcement 모드에서 LLM이 정하거나 교차 확인하는 시행일의 정책을 적는다. 판단 결과는 원장 파일에 따로 저장하고, 이 문서는 판단 정책, 프롬프트, 대상 범주, 사용자 결정 보호 목록을 정한다. 정본 이슈는 epruseal/compiler#2다. 사례와 측정 기록은 [LLM 시행일 판단 기록](llm-date-judgment-findings.md)에, 파서 규칙의 예외와 사례는 [시행일 예외 기록](enforcement-date-exceptions.md)에 있다.
 
 ## 결정 근거
 
